@@ -149,8 +149,10 @@ def main():
         save_steps=args.steps_per_batch,
         save_total_limit=4,
         beta=0.04,
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
+        # Unsloth model is loaded with dtype=torch.float16 above; keep trainer
+        # precision aligned to avoid float16/bfloat16 mismatch errors.
+        fp16=True,
+        bf16=False,
         report_to="none",
     )
     trainer = GRPOTrainer(
