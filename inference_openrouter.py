@@ -31,7 +31,7 @@ from models import IncidentCommanderAction
 
 DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
 DEFAULT_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-DEFAULT_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+DEFAULT_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 SYSTEM_PROMPT = """You are an elite AI Incident Commander specialising in SRE.
 
