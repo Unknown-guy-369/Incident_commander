@@ -9,11 +9,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import Dict, Any
 
 import torch
 from datasets import Dataset
 from unsloth import FastLanguageModel, PatchFastRL
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 PatchFastRL("GRPO", FastLanguageModel)
 from trl import GRPOConfig, GRPOTrainer
