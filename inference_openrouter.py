@@ -1,0 +1,397 @@
+"""
+AI Incident Commander — OpenRouter Inference Script
+
+Runs an episode using an LLM from OpenRouter (OpenAI-compatible API).
+Works with any model supported by OpenRouter: Claude, Gemini, Llama, etc.
+
+Usage:
+    python inference_openrouter.py --model anthropic/claude-3.5-sonnet --difficulty 1
+    python inference_openrouter.py --model openai/gpt-4o --difficulty 2
+"""
+
+import os
+import re
+import argparse
+from dataclasses import dataclass
+from typing import Optional
+
+# OpenAI SDK (works with OpenRouter since it's OpenAI-compatible)
+try:
+    from openai import OpenAI
+except ImportError:
+    raise ImportError("openai package required: pip install openai")
+
+from server.incident_commander_environment import IncidentCommanderEnvironment
+from models import IncidentCommanderAction
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+DEFAULT_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+DEFAULT_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+
+SYSTEM_PROMPT = """You are an elite AI Incident Commander specialising in SRE.
+
+Your job: investigate microservice outages, identify root causes, and apply fixes.
+
+Episode flow:
+  1. Read logs / metrics to investigate
+  2. Read deployment history and dependency graph for context
+  3. Call identify_cause with your hypothesis
+  4. Apply the correct fix (restart_pod | rollback | scale_up | hotfix)
+  5. Call monitor_recovery to observe outcome
+  6. Call resolve once service is healthy
+
+Rules:
+  - You MUST read at least 2 log/metric sources before applying any fix
+  - You MUST call identify_cause and lock a root cause hypothesis before fixing
+  - Output your reasoning in <thought> tags before every action
+  - Format actions as: <action>action_type:target_service</action>
+  - If the fix doesn't work (degraded/worse), revise your hypothesis and try again
+
+Root cause → correct fix reference:
+  memory_limit_too_low      → scale_up
+  bad_deployment            → rollback
+  connection_pool_exhausted → hotfix
+  traffic_spike             → scale_up
+  dependency_failure       → restart_pod
+  config_error              → hotfix
+  redis_down                → restart_pod
+  certificate_expired      → hotfix
+"""
+
+
+# ---------------------------------------------------------------------------
+# Action Parser
+# ---------------------------------------------------------------------------
+
+def parse_action(completion: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract action_type and target_service from <action> tags."""
+    match = re.search(r"<action>([^:<]+):([^<]+)</action>", completion)
+    if match:
+        action_type = match.group(1).strip()
+        target = match.group(2).strip()
+        return action_type, target
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# LLM Client
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMResponse:
+    content: str
+    reasoning: Optional[str] = None
+    model: Optional[str] = None
+    usage: Optional[dict] = None
+
+
+class OpenRouterLLM:
+    """Lightweight OpenRouter client."""
+
+    def __init__(
+        self,
+        model: str = DEFAULT_MODEL,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = DEFAULT_API_KEY,
+        temperature: float = 0.3,
+        max_tokens: int = 512,
+    ):
+        if not api_key:
+            raise ValueError(
+                "OpenRouter API key required. Set OPENROUTER_API_KEY env var "
+                "or pass --api-key"
+            )
+
+        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def generate(self, prompt: str, system: str = SYSTEM_PROMPT) -> LLMResponse:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        choice = response.choices[0]
+        content = choice.message.content or ""
+
+        # Extract reasoning from <thought> tags if present
+        thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
+        reasoning = thought_match.group(1).strip() if thought_match else None
+
+        return LLMResponse(
+            content=content,
+            reasoning=reasoning,
+            model=response.model,
+            usage={
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
+# Episode Runner
+# ---------------------------------------------------------------------------
+
+def format_observation(obs) -> str:
+    """Format the current observation as a prompt suffix for the LLM."""
+    lines = [f"Alert: {obs.alert_summary}"]
+    lines.append(f"Services: {[s['name'] for s in obs.services_overview]}")
+
+    if obs.last_action_result:
+        lines.append(f"Last result: {obs.last_action_result}")
+
+    if obs.steps_remaining < 50:
+        lines.append(f"Steps remaining: {obs.steps_remaining}")
+
+    # Show what's been revealed
+    if obs.revealed_logs:
+        lines.append(f"Logs read: {list(obs.revealed_logs.keys())}")
+    if obs.revealed_metrics:
+        lines.append(f"Metrics read: {list(obs.revealed_metrics.keys())}")
+
+    # Show locked hypothesis
+    if obs.hypothesis_locked:
+        lines.append(f"HYPOTHESIS LOCKED: {obs.locked_hypothesis}")
+
+    # Show post-fix status
+    if obs.post_fix_status:
+        status_emoji = {
+            "recovered": "✅",
+            "degraded": "⚠️",
+            "worse": "🔴",
+        }.get(obs.post_fix_status, "❓")
+        lines.append(f"Post-fix status: {status_emoji} {obs.post_fix_status}")
+
+    return "\n".join(lines)
+
+
+def run_episode(
+    llm: OpenRouterLLM,
+    difficulty: int = 1,
+    max_steps: int = 50,
+    verbose: bool = True,
+) -> dict:
+    """Run a single episode with an OpenRouter LLM."""
+    env = IncidentCommanderEnvironment(difficulty=difficulty)
+    obs = env.reset()
+
+    total_reward = 0.0
+    steps = []
+
+    for step in range(max_steps):
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"Step {step + 1}/{max_steps} | Steps remaining: {obs.steps_remaining}")
+
+        # Build the prompt
+        obs_text = format_observation(obs)
+        prompt = (
+            f"Current observation:\n{obs_text}\n\n"
+            "What is your next action? "
+            "Output reasoning in <thought> then action in <action> tags."
+        )
+
+        # Query LLM
+        response = llm.generate(prompt)
+        if verbose:
+            print(f"Model: {response.model} | Tokens: {response.usage['total_tokens']}")
+            print(f"\nLLM Output:\n{response.content[:500]}")
+
+        # Parse action
+        action_type, target = parse_action(response.content)
+        if not action_type:
+            msg = "No valid <action> tag found. Skipping step."
+            if verbose:
+                print(f"⚠️  {msg}")
+            obs = env.step(IncidentCommanderAction(
+                action_type="read_logs",
+                target_service="payment-service",
+            ))
+            total_reward = obs.reward
+            steps.append({"step": step + 1, "action": "PARSE_ERROR", "target": None})
+            continue
+
+        # Handle no-target actions (use a default)
+        if not target:
+            target = "payment-service"
+
+        if verbose:
+            print(f"→ Action: {action_type} | Target: {target}")
+
+        # Execute in environment
+        try:
+            obs = env.step(IncidentCommanderAction(
+                action_type=action_type,
+                target_service=target,
+            ))
+        except Exception as e:
+            if verbose:
+                print(f"⚠️  Env error: {e}")
+            steps.append({"step": step + 1, "action": action_type, "target": target, "error": str(e)})
+            continue
+
+        total_reward = obs.reward
+        steps.append({
+            "step": step + 1,
+            "action": action_type,
+            "target": target,
+            "reward": obs.reward,
+            "post_fix": obs.post_fix_status,
+        })
+
+        if verbose:
+            print(f"Reward: {obs.reward:.3f} | Done: {obs.done}")
+            if obs.last_action_result:
+                print(f"Result: {obs.last_action_result}")
+
+        if obs.done:
+            if verbose:
+                print(f"\n🏁 Episode ended. {obs.last_action_result}")
+            break
+
+    if not obs.done and verbose:
+        print(f"\n⏰ Episode timed out after {max_steps} steps.")
+
+    return {
+        "done": obs.done,
+        "total_reward": total_reward,
+        "steps": steps,
+        "reward_breakdown": obs.reward_breakdown,
+        "final_result": obs.last_action_result,
+    }
+
+
+def run_multi_episode(
+    llm: OpenRouterLLM,
+    num_episodes: int = 5,
+    difficulty: int = 1,
+    max_steps: int = 50,
+) -> list[dict]:
+    """Run multiple episodes and aggregate results."""
+    results = []
+    for i in range(num_episodes):
+        print(f"\n{'#'*70}")
+        print(f"# Episode {i + 1}/{num_episodes}  (Difficulty {difficulty})")
+        print(f"{'#'*70}")
+        result = run_episode(llm, difficulty=difficulty, max_steps=max_steps)
+        results.append(result)
+
+    # Summary
+    print(f"\n{'='*70}")
+    print(f"RESULTS OVER {num_episodes} EPISODES (Difficulty {difficulty})")
+    print(f"{'='*70}")
+    total_rewards = [r["total_reward"] for r in results]
+    wins = sum(1 for r in results if r["done"])
+    for i, r in enumerate(results):
+        status = "✅ RESOLVED" if r["done"] else "❌ TIMEOUT"
+        print(f"  Episode {i+1}: reward={r['total_reward']:.3f} | {status}")
+
+    print(f"\n  Win rate:  {wins}/{num_episodes} ({100*wins/num_episodes:.1f}%)")
+    print(f"  Mean reward: {sum(total_rewards)/len(total_rewards):.3f}")
+    print(f"  Min reward:  {min(total_rewards):.3f}")
+    print(f"  Max reward:  {max(total_rewards):.3f}")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="OpenRouter inference for Incident Commander")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=f"OpenRouter model name (default: {DEFAULT_MODEL})",
+    )
+    parser.add_argument(
+        "--base-url",
+        type=str,
+        default=DEFAULT_BASE_URL,
+        help=f"OpenRouter base URL (default: {DEFAULT_BASE_URL})",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=DEFAULT_API_KEY,
+        help="OpenRouter API key (or set OPENROUTER_API_KEY env var)",
+    )
+    parser.add_argument(
+        "--difficulty",
+        type=int,
+        default=1,
+        choices=[1, 2, 3, 4],
+        help="Scenario difficulty (1=easy, 4=expert)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=1,
+        help="Number of episodes to run (default: 1)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=50,
+        help="Max steps per episode (default: 50)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-step LLM output (show only summary)",
+    )
+    args = parser.parse_args()
+
+    # Resolve API key
+    api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        parser.error(
+            "OpenRouter API key required. Pass --api-key or set OPENROUTER_API_KEY env var.\n"
+            "Get your key at https://openrouter.ai/keys"
+        )
+
+    print(f"Using model: {args.model}")
+    print(f"Base URL:    {args.base_url}")
+
+    llm = OpenRouterLLM(
+        model=args.model,
+        base_url=args.base_url,
+        api_key=api_key,
+    )
+
+    if args.episodes == 1:
+        result = run_episode(
+            llm,
+            difficulty=args.difficulty,
+            max_steps=args.max_steps,
+            verbose=not args.quiet,
+        )
+        print(f"\nFinal result: {result['final_result']}")
+        print(f"Total reward: {result['total_reward']:.3f}")
+    else:
+        run_multi_episode(
+            llm,
+            num_episodes=args.episodes,
+            difficulty=args.difficulty,
+            max_steps=args.max_steps,
+        )
+
+
+if __name__ == "__main__":
+    main()

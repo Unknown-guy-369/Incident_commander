@@ -1,0 +1,63 @@
+spec_version: 1
+name: incident_commander
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+description: >
+  AI Incident Commander — an OpenEnv RL environment where an agent investigates
+  and resolves microservice outages. Theme 3.1 compliant: real stateful tool
+  interactions, strict partial observability, causal chain scenarios, multi-round
+  fix loops, and 4 independent reward signals.
+
+tags:
+  - openenv
+  - incident-commander
+  - sre
+  - rl-environment
+  - theme-3-1
+  - causal-reasoning
+
+tasks:
+  - id: 1
+    name: "Single Service Outage (Easy)"
+    difficulty: easy
+    description: >
+      One service is down with one obvious root cause. No red herrings beyond
+      normal system noise. Agent must investigate logs/metrics, form a hypothesis,
+      apply the correct fix, and confirm recovery.
+    grader: compound
+    max_score: 1.0
+
+  - id: 2
+    name: "Cascade Failure (Medium)"
+    difficulty: medium
+    description: >
+      A failure in one service cascades to downstream services. One red herring.
+      Agent must trace the dependency graph to find the true root cause.
+    grader: compound
+    max_score: 1.0
+
+  - id: 3
+    name: "Multi-Hop Causal Chain (Hard)"
+    difficulty: hard
+    description: >
+      Redis down → auth slow → API timeouts → payment failing. Multiple red
+      herrings. Agent must trace the full causal dependency chain to the hidden
+      root service.
+    grader: compound
+    max_score: 1.0
+
+  - id: 4
+    name: "Full Production Incident (Expert)"
+    difficulty: expert
+    description: >
+      20+ services, 3 simultaneous failures, 5 red herrings, time pressure.
+      Agent must prioritise, triage, and resolve within 50 steps.
+    grader: compound
+    max_score: 1.0
+
+resources:
+  cpu: 2
+  memory: 4GB

@@ -1,0 +1,43 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Models (generated during training)
+outputs/
+*.bin
+*.pt
+*.pth
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Confidential
+*.env
+.env.local
+credentials.json
+secrets.json

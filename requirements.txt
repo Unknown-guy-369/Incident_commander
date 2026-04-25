@@ -1,0 +1,12 @@
+# Project dependencies for Incident Commander
+# Python runtime requirement: >=3.10
+torch
+openenv-core[core]>=0.2.2
+fastapi>=0.115.0
+uvicorn>=0.24.0
+datasets
+unsloth
+openai
+# Development/test dependencies
+pytest>=8.0.0
+pytest-cov>=4.0.0
