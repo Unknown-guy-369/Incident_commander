@@ -1,6 +1,10 @@
 # Incident Commander Environment — Docker Image
 # Multi-stage build using a standard public Python base image.
 # Compatible with Hugging Face Spaces (Docker SDK) and local Docker builds.
+#
+# NOTE: HuggingFace Spaces (sdk: docker) requires the Dockerfile to be at the
+# root of the Space repository. This file lives at the repo root and mirrors
+# the build defined in server/Dockerfile.
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
