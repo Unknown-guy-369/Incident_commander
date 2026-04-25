@@ -1,29 +1,5 @@
 """
 Multi-turn rollout machinery for the Incident Commander environment.
-
-This module is the missing piece that turns the env from a one-shot
-"submit one action, get a reward of zero" target into a real RL environment
-that exercises every reward signal.
-
-Two clients are provided:
-
-    SyncEnvClient — a tiny `requests`-based client that talks HTTP to a
-    deployed OpenEnv server (default: the team's HF Space). Used during
-    GRPO training because TRL's reward functions run synchronously.
-
-    LocalEnvAdapter — wraps a local `IncidentCommanderEnvironment` instance
-    in the same interface so unit tests and offline development don't need
-    network.
-
-Two rollout functions:
-
-    rollout_completion(env_client, prompt, completion) — parses ONE action
-    out of `completion` and runs ONE step. Used by single-step rewards.
-
-    rollout_episode(env_client, generate_fn, max_steps, ...) — drives a
-    full multi-turn episode by alternating model.generate ↔ env.step until
-    `done` or `max_steps`. Used by every reward signal that needs the
-    episode to terminate.
 """
 
 from __future__ import annotations
@@ -34,8 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
 try:
-    import requests  # noqa: F401
-except ImportError:  # pragma: no cover
+    import requests
+except ImportError:
     requests = None  # type: ignore
 
 
@@ -46,30 +22,17 @@ DEFAULT_REMOTE_URL = os.environ.get(
 
 
 VALID_ACTIONS = (
-    "read_logs",
-    "read_metrics",
-    "read_deployment_history",
-    "read_dependency_graph",
+    "read_logs", "read_metrics",
+    "read_deployment_history", "read_dependency_graph",
     "identify_cause",
-    "restart_pod",
-    "rollback",
-    "scale_up",
-    "hotfix",
-    "escalate",
-    "monitor_recovery",
-    "resolve",
+    "restart_pod", "rollback", "scale_up", "hotfix",
+    "escalate", "monitor_recovery", "resolve",
 )
 
-
 VALID_HYPOTHESES = (
-    "memory_limit_too_low",
-    "bad_deployment",
-    "connection_pool_exhausted",
-    "traffic_spike",
-    "dependency_failure",
-    "config_error",
-    "redis_down",
-    "certificate_expired",
+    "memory_limit_too_low", "bad_deployment", "connection_pool_exhausted",
+    "traffic_spike", "dependency_failure", "config_error",
+    "redis_down", "certificate_expired",
 )
 
 
@@ -81,8 +44,7 @@ _ACTION_RE = re.compile(r"<action>\s*([^:<\n]+?)\s*(?::\s*([^<\n]*?))?\s*</actio
 _HYPOTHESIS_RE = re.compile(r"<hypothesis>\s*([^<\n]+?)\s*</hypothesis>", re.DOTALL)
 
 
-def parse_action(completion: str) -> "tuple[Optional[str], Optional[str]]":
-    """Returns (action_type, target_service) or (None, None)."""
+def parse_action(completion):
     m = _ACTION_RE.search(completion)
     if not m:
         return None, None
@@ -91,9 +53,7 @@ def parse_action(completion: str) -> "tuple[Optional[str], Optional[str]]":
     return atype, target
 
 
-def parse_hypothesis(completion: str) -> Optional[str]:
-    """Tries `<hypothesis>x</hypothesis>` first, then falls back to scanning
-    the completion for any of the 8 valid root cause tokens."""
+def parse_hypothesis(completion):
     m = _HYPOTHESIS_RE.search(completion)
     if m:
         return m.group(1).strip()
@@ -104,48 +64,39 @@ def parse_hypothesis(completion: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# SyncEnvClient — minimal sync HTTP client for an OpenEnv server
+# SyncEnvClient
 # ---------------------------------------------------------------------------
 
 class SyncEnvClient:
-    """Drop-in replacement for the async openenv EnvClient when running
-    inside GRPO reward callbacks (which are synchronous)."""
+    """Sync HTTP client for OpenEnv server (used inside GRPO reward callbacks)."""
 
-    def __init__(self, base_url: str = DEFAULT_REMOTE_URL, timeout: float = 30.0):
+    def __init__(self, base_url=DEFAULT_REMOTE_URL, timeout=30.0):
         if requests is None:
-            raise ImportError("`requests` is required for SyncEnvClient; pip install requests")
+            raise ImportError("requests is required: pip install requests")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.session = requests.Session()
 
-    # -- context manager ----------------------------------------------------
-    def __enter__(self) -> "SyncEnvClient":
+    def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type, exc, tb):
         self.close()
 
-    def close(self) -> None:
+    def close(self):
         self.session.close()
 
-    # -- API ----------------------------------------------------------------
-    def reset(self, difficulty: Optional[int] = None) -> Dict[str, Any]:
-        body: Dict[str, Any] = {}
+    def reset(self, difficulty=None):
+        body = {}
         if difficulty is not None:
             body["difficulty"] = difficulty
         resp = self.session.post(f"{self.base_url}/reset", json=body, timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
 
-    def step(
-        self,
-        action_type: str,
-        target_service: Optional[str] = None,
-        hypothesis: Optional[str] = None,
-        justification: Optional[str] = None,
-        time_range_minutes: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        action: Dict[str, Any] = {
+    def step(self, action_type, target_service=None, hypothesis=None,
+             justification=None, time_range_minutes=None):
+        action = {
             "action_type": action_type,
             "target_service": target_service or "payment-service",
         }
@@ -163,52 +114,44 @@ class SyncEnvClient:
 
 
 # ---------------------------------------------------------------------------
-# LocalEnvAdapter — same surface as SyncEnvClient, but in-process
+# LocalEnvAdapter
 # ---------------------------------------------------------------------------
 
 class LocalEnvAdapter:
-    """Wraps an in-process `IncidentCommanderEnvironment` in the SyncEnvClient
-    surface so the same rollout code works offline."""
+    """Wraps an in-process IncidentCommanderEnvironment with the SyncEnvClient surface."""
 
-    def __init__(self, env, difficulty: int = 1):
+    def __init__(self, env, difficulty=1):
         self.env = env
         self.difficulty = difficulty
 
-    def __enter__(self) -> "LocalEnvAdapter":
+    def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type, exc, tb):
         pass
 
-    def close(self) -> None:
+    def close(self):
         pass
 
     @staticmethod
-    def _obs_to_dict(obs) -> Dict[str, Any]:
+    def _obs_to_dict(obs):
         if hasattr(obs, "model_dump"):
             return obs.model_dump()
         if hasattr(obs, "dict"):
             return obs.dict()
         return dict(obs)
 
-    def reset(self, difficulty: Optional[int] = None) -> Dict[str, Any]:
+    def reset(self, difficulty=None):
         d = difficulty if difficulty is not None else self.difficulty
         obs = self.env.reset(difficulty=d)
         return {"observation": self._obs_to_dict(obs), "reward": 0.0, "done": False}
 
-    def step(
-        self,
-        action_type: str,
-        target_service: Optional[str] = None,
-        hypothesis: Optional[str] = None,
-        justification: Optional[str] = None,
-        time_range_minutes: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        # local import to avoid a hard dependency at module load
+    def step(self, action_type, target_service=None, hypothesis=None,
+             justification=None, time_range_minutes=None):
         try:
             from models import IncidentCommanderAction
         except (ImportError, ModuleNotFoundError):
-            from incident_commander.models import IncidentCommanderAction  # type: ignore
+            from incident_commander.models import IncidentCommanderAction
         action = IncidentCommanderAction(
             action_type=action_type,
             target_service=target_service or "payment-service",
@@ -225,13 +168,11 @@ class LocalEnvAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Episode state — the dict the reward functions consume
+# Episode state
 # ---------------------------------------------------------------------------
 
 @dataclass
 class EpisodeState:
-    """Aggregated terminal state of a multi-turn rollout."""
-
     post_fix_status: Optional[str] = None
     locked_hypothesis: Optional[str] = None
     true_root_cause: str = ""
@@ -244,11 +185,9 @@ class EpisodeState:
     read_root_service: bool = False
     last_reward: float = 0.0
     last_observation: Dict[str, Any] = field(default_factory=dict)
-    transcript: List[Dict[str, Any]] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self):
         bd = (self.last_observation or {}).get("reward_breakdown") or {}
-        # Coerce reward_breakdown into a dict in case it's something weird
         if not isinstance(bd, dict):
             bd = {}
         return {
@@ -263,22 +202,16 @@ class EpisodeState:
             "steps_used": self.steps_used,
             "read_root_service": self.read_root_service,
             "last_reward": self.last_reward,
-            # Server-authoritative per-signal scores. Both the old (deployed
-            # HF Space) and the new server populate these; only the new one
-            # ships `true_root_cause`/`root_service`. The GRPO reward
-            # functions therefore prefer reading from this breakdown.
             "reward_breakdown": dict(bd),
         }
 
 
 # ---------------------------------------------------------------------------
-# Prompt rendering helper
+# Prompt rendering
 # ---------------------------------------------------------------------------
 
-def render_observation(obs: Dict[str, Any]) -> str:
-    """Compact text form of an observation for inclusion in a prompt."""
-    parts = []
-    parts.append(f"Alert: {obs.get('alert_summary', '')}")
+def render_observation(obs):
+    parts = [f"Alert: {obs.get('alert_summary', '')}"]
     services = obs.get("services_overview") or []
     if services:
         names = [s.get("name") for s in services]
@@ -305,44 +238,74 @@ def render_observation(obs: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# SYSTEM_PROMPT with one-shot worked example
+# ---------------------------------------------------------------------------
+
 SYSTEM_PROMPT = """You are an AI Incident Commander.
-You investigate microservice outages by using tools and reasoning causally.
+Investigate microservice outages by using tools and reasoning causally.
+
+Output every turn as: a <thought>...</thought> block, then exactly one
+<action>action_type:target_service</action> tag.
+For identify_cause, also include <hypothesis>name</hypothesis> just before
+the <action> tag.
 
 Episode flow:
-  1. Read logs / metrics / deployment_history / dependency_graph to investigate.
-  2. Call identify_cause with a hypothesis (one of:
-     memory_limit_too_low, bad_deployment, connection_pool_exhausted,
-     traffic_spike, dependency_failure, config_error, redis_down,
-     certificate_expired).
-  3. Apply the matching fix (restart_pod, rollback, scale_up, or hotfix).
-  4. Call monitor_recovery to observe outcome.
-  5. Call resolve once the service has recovered.
+  1. read_logs and read_metrics on at least 3 different services.
+  2. identify_cause with a hypothesis (one of: memory_limit_too_low,
+     bad_deployment, connection_pool_exhausted, traffic_spike,
+     dependency_failure, config_error, redis_down, certificate_expired).
+  3. Apply the matching fix:
+     memory_limit_too_low->scale_up, bad_deployment->rollback,
+     connection_pool_exhausted->hotfix, traffic_spike->scale_up,
+     dependency_failure->restart_pod, config_error->hotfix,
+     redis_down->restart_pod, certificate_expired->hotfix.
+  4. monitor_recovery to confirm.
+  5. resolve to close.
 
-Output your reasoning in <thought>...</thought> and your single next
-action in <action>action_type:target_service</action>. For identify_cause
-also include <hypothesis>name</hypothesis>.
+=== Worked example (follow this format exactly) ===
+Observation: Alert: payment-service error rate critical
+Services: ['api-gateway', 'payment-service', 'auth-service']
+<thought>Investigating payment-service first.</thought><action>read_logs:payment-service</action>
+
+Observation: FATAL OOMKilled, memory at 98%.
+<thought>Memory issue; check another service.</thought><action>read_logs:auth-service</action>
+
+Observation: auth-service all systems normal.
+<thought>Read api-gateway too.</thought><action>read_logs:api-gateway</action>
+
+Observation: api-gateway normal.
+<thought>Read metrics on payment-service.</thought><action>read_metrics:payment-service</action>
+
+Observation: cpu=85, memory=98, oom_kills=5.
+<thought>Memory limit too low. Lock hypothesis.</thought><hypothesis>memory_limit_too_low</hypothesis><action>identify_cause:payment-service</action>
+
+Observation: Hypothesis locked: memory_limit_too_low.
+<thought>The fix for memory_limit_too_low is scale_up.</thought><action>scale_up:payment-service</action>
+
+Observation: Fix applied. Call monitor_recovery.
+<thought>Check status.</thought><action>monitor_recovery:</action>
+
+Observation: payment-service is HEALTHY. Call resolve.
+<thought>Recovered, closing.</thought><action>resolve:</action>
+=== End example ===
+
+Now do the real episode below. One <thought> + one <action> per turn.
 """
 
 
 # ---------------------------------------------------------------------------
-# Single-step rollout (kept for backward compatibility)
+# Single-step rollout (kept for compatibility)
 # ---------------------------------------------------------------------------
 
-def rollout_completion(env_client, prompt: str, completion: str,
-                       difficulty: Optional[int] = 1) -> EpisodeState:
-    """Runs ONE step of the env for the action parsed out of `completion`.
-
-    Used as a fallback when the model emits a single-action turn rather than
-    a planned trajectory.
-    """
+def rollout_completion(env_client, prompt, completion, difficulty=1):
     state = EpisodeState()
     atype, target = parse_action(completion)
     if atype is None or atype not in VALID_ACTIONS:
         return state
-
     try:
         env_client.reset(difficulty=difficulty)
-        kwargs: Dict[str, Any] = {}
+        kwargs = {}
         if atype == "identify_cause":
             kwargs["hypothesis"] = parse_hypothesis(completion)
         result = env_client.step(action_type=atype, target_service=target or None, **kwargs)
@@ -361,46 +324,27 @@ def rollout_completion(env_client, prompt: str, completion: str,
             state.already_read_logs.add(target)
         if atype == "read_metrics" and target:
             state.already_read_metrics.add(target)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return state
 
 
 # ---------------------------------------------------------------------------
-# Multi-turn rollout — the heart of the fix
+# Multi-turn rollout
 # ---------------------------------------------------------------------------
 
-def rollout_episode(
-    env_client,
-    generate_fn: Callable[[str], str],
-    max_steps: int = 25,
-    difficulty: Optional[int] = 1,
-    system_prompt: str = SYSTEM_PROMPT,
-    on_step: Optional[Callable[[int, str, Dict[str, Any]], None]] = None,
-    deterministic_root_cause: Optional[str] = None,
-) -> EpisodeState:
-    """Run a full multi-turn episode: model.generate ↔ env.step.
+def rollout_episode(env_client, generate_fn, max_steps=12, difficulty=1,
+                    system_prompt=None, on_step=None,
+                    deterministic_root_cause=None):
+    """Run a full multi-turn episode: model.generate <-> env.step."""
+    if system_prompt is None:
+        system_prompt = SYSTEM_PROMPT
 
-    Args:
-        env_client:    SyncEnvClient or LocalEnvAdapter.
-        generate_fn:   Callable taking a prompt string and returning the model's
-                       completion. The implementation decides decoding params.
-        max_steps:     Maximum env steps (defaults to 25 to respect Colab budgets;
-                       MAX_STEPS in the env is 50).
-        difficulty:    Difficulty to request at reset.
-        system_prompt: System prompt prepended to every turn.
-        on_step:       Optional callback (step_idx, completion, obs_dict).
-        deterministic_root_cause: For unit tests — bypass model and use known cause.
-
-    Returns:
-        EpisodeState with terminal aggregates suitable for the reward functions.
-    """
     state = EpisodeState()
     init = env_client.reset(difficulty=difficulty)
     obs = init.get("observation", {})
     transcript_so_far = system_prompt
     state.last_observation = obs
-    # Best-effort recovery of the true root cause for offline reward replay.
     if deterministic_root_cause is not None:
         state.true_root_cause = deterministic_root_cause
 
@@ -414,15 +358,14 @@ def rollout_episode(
         completion = generate_fn(prompt)
         atype, target = parse_action(completion)
 
-        # Bookkeeping for malformed completions
         if atype is None or atype not in VALID_ACTIONS:
             state.actions_taken.append("__parse_error__")
-            transcript_so_far += f"\nAssistant: {completion}\nObservation: (parse error, agent must retry)"
+            transcript_so_far += f"\nAssistant: {completion}\nObservation: (parse error)"
             if on_step:
                 on_step(step_idx, completion, obs)
             continue
 
-        kwargs: Dict[str, Any] = {}
+        kwargs = {}
         if atype == "identify_cause":
             kwargs["hypothesis"] = parse_hypothesis(completion)
         if atype in ("escalate", "resolve"):
@@ -432,7 +375,7 @@ def rollout_episode(
             result = env_client.step(
                 action_type=atype, target_service=target or None, **kwargs
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             transcript_so_far += f"\nAssistant: {completion}\nObservation: (env error: {e})"
             state.actions_taken.append("__env_error__")
             continue
@@ -456,13 +399,10 @@ def rollout_episode(
 
         state.post_fix_status = obs.get("post_fix_status")
 
-        # Lazy guess at root service from the observation, so we can credit
-        # `read_root_service` even without a privileged channel.
         if not state.read_root_service:
-            services = [s.get("name") for s in (obs.get("services_overview") or [])]
+            degraded = [s.get("name") for s in (obs.get("services_overview") or [])
+                        if s.get("status") == "degraded"]
             for svc in (state.already_read_logs | state.already_read_metrics):
-                # Approximation: the "root" is the most-degraded service in the overview.
-                degraded = [s.get("name") for s in (obs.get("services_overview") or []) if s.get("status") == "degraded"]
                 if svc in degraded:
                     state.read_root_service = True
                     break
@@ -477,9 +417,6 @@ def rollout_episode(
         if result.get("done"):
             break
 
-    # Final true-root-cause recovery from terminal breakdown if available.
-    # The env appends `true_root_cause` and `root_service` to the breakdown
-    # only on done=True, so this is safe — the agent never sees them mid-episode.
     bd = (state.last_observation or {}).get("reward_breakdown") or {}
     if not state.true_root_cause and isinstance(bd, dict):
         state.true_root_cause = bd.get("true_root_cause", "") or state.true_root_cause
@@ -494,26 +431,13 @@ def rollout_episode(
 
 
 # ---------------------------------------------------------------------------
-# Convenience wrapper — used by training/notebook
+# Convenience factory
 # ---------------------------------------------------------------------------
 
-def make_episode_rollout_fn(
-    env_url: Optional[str] = None,
-    generate_fn: Optional[Callable[[str], str]] = None,
-    max_steps: int = 15,
-    difficulty: int = 1,
-    use_local: bool = False,
-):
-    """Returns a `rollout_fn(prompt, completion) -> dict` for use with
-    `rewards.make_grpo_reward_fns(...)`.
-
-    The returned callable IGNORES `prompt` (the env handles its own state)
-    and IGNORES `completion` (a real episode is generated via `generate_fn`).
-    This is the canonical way to drive multi-turn GRPO with the four
-    reward signals.
-    """
+def make_episode_rollout_fn(env_url=None, generate_fn=None, max_steps=12,
+                            difficulty=1, use_local=False):
     if generate_fn is None:
-        raise ValueError("generate_fn is required — pass a fn that calls model.generate")
+        raise ValueError("generate_fn is required")
 
     def _factory():
         if use_local:
@@ -523,10 +447,13 @@ def make_episode_rollout_fn(
                 from incident_commander.server.incident_commander_environment import (
                     IncidentCommanderEnvironment,
                 )
-            return LocalEnvAdapter(IncidentCommanderEnvironment(difficulty=difficulty), difficulty=difficulty)
+            return LocalEnvAdapter(
+                IncidentCommanderEnvironment(difficulty=difficulty),
+                difficulty=difficulty,
+            )
         return SyncEnvClient(env_url or DEFAULT_REMOTE_URL)
 
-    def rollout_fn(prompt: str, completion: str) -> Dict[str, Any]:
+    def rollout_fn(prompt, completion):
         with _factory() as env:
             state = rollout_episode(
                 env, generate_fn,
