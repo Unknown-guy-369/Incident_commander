@@ -1,126 +1,173 @@
 """
-AI Incident Commander — Demo Inference Script
-Loads a trained Unsloth model and runs a full episode in the environment.
+AI Incident Commander — local inference / evaluation script.
+
+Loads a trained Unsloth model and runs full multi-turn episodes against
+the live environment (remote HF Space by default; pass --env-url '' for
+the in-process environment).
+
+Usage:
+    python inference.py --model outputs/commander_final --difficulty 1
+    python inference.py --model outputs/commander_final --episodes 20
 """
 
-import os
-import time
+from __future__ import annotations
+
 import argparse
-from unsloth import FastLanguageModel
+import os
+import statistics
+import sys
 
-from server.incident_commander_environment import IncidentCommanderEnvironment
-from client import IncidentCommanderEnv
-from models import IncidentCommanderAction
+# Make sibling imports work whether we're a script or a package member.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import re
+from rollout import (  # noqa: E402
+    DEFAULT_REMOTE_URL,
+    SYSTEM_PROMPT,
+    SyncEnvClient,
+    LocalEnvAdapter,
+    rollout_episode,
+)
 
-REMOTE_ENV_URL = os.environ.get(
-    "INCIDENT_COMMANDER_ENV_URL",
-    "https://abishek-priyan-369-incident-commander.hf.space",
-).rstrip("/")
 
-# Format tag parsing
-def parse_action(completion: str):
-    match = re.search(r"<action>(.*?):?(.*?)</action>", completion)
-    if match:
-        atype = match.group(1).strip()
-        target = match.group(2).strip() if match.group(2) else "payment-service"
-        return atype, target
-    return None, None
-
-def run_episode(model, tokenizer, difficulty=1, max_steps=50, env_url=None):
-    print(f"\n--- Starting Evaluation Episode (Difficulty {difficulty}) ---")
-    use_remote_env = bool(env_url)
-
-    if use_remote_env:
-        print(f"Using remote environment: {env_url}")
-        env = IncidentCommanderEnv(base_url=env_url)
-    else:
-        print("Using local in-process environment.")
-        env = IncidentCommanderEnvironment(difficulty=difficulty)
-
-    obs = env.reset()
-    
-    system_prompt = """You are an AI Incident Commander.
-You must investigate microservice outages by using tools and reasoning causally.
-Output your reasoning in <thought> tags, then lock your hypothesis and apply a fix.
-Action format: <action>action_name:target_service</action>"""
-
-    total_reward = 0
-    
-    for step in range(max_steps):
-        print(f"\n[Step {step + 1}/{max_steps}]")
-        
-        # Format the observation for the model
-        prompt = f"System: {system_prompt}\n\nObservation: {obs.alert_summary}\n"
-        if obs.last_action_result:
-            prompt += f"Previous Action Result: {obs.last_action_result}\n"
-        prompt += f"Services Overview: {obs.services_overview}\n\n"
-        prompt += "What is your next action? Think step by step."
-        
-        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-        outputs = model.generate(**inputs, max_new_tokens=200, use_cache=True)
-        
-        # Decode and parse
-        completion = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
-        print(f"Agent Output:\n{completion}\n")
-        
-        action_type, target = parse_action(completion)
-        if not action_type:
-            print("❌ Agent produced an invalid format! Ending episode.")
-            break
-            
-        print(f"Action parsed: {action_type} on {target}")
-        
-        # Step the environment
-        step_result = env.step(
-            IncidentCommanderAction(action_type=action_type, target_service=target)
+def _make_local_env(difficulty: int):
+    try:
+        from server.incident_commander_environment import IncidentCommanderEnvironment
+    except (ImportError, ModuleNotFoundError):
+        from incident_commander.server.incident_commander_environment import (  # type: ignore
+            IncidentCommanderEnvironment,
         )
-        obs = step_result.observation if use_remote_env else step_result
-        total_reward = float(step_result.reward)
-        
-        if obs.done:
-            print(f"\n✅ Episode finished! Final result: {obs.last_action_result}")
-            print(f"🏆 Final Reward: {total_reward:.3f}")
-            if obs.reward_breakdown:
-                print(f"📊 Breakdown: {obs.reward_breakdown}")
-            break
-            
-    if not obs.done:
-        print("\n❌ Episode timed out!")
-    if use_remote_env:
-        env.close()
+    return LocalEnvAdapter(IncidentCommanderEnvironment(difficulty=difficulty), difficulty=difficulty)
+
+
+def make_generate_fn(model, tokenizer, max_new_tokens: int = 200, temperature: float = 0.7):
+    import torch
+
+    device = next(model.parameters()).device
+
+    def _generate(prompt: str) -> str:
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1536).to(device)
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=temperature > 0,
+                temperature=temperature,
+                pad_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+            )
+        return tokenizer.decode(
+            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        )
+
+    return _generate
+
+
+def _on_step(step_idx: int, completion: str, obs: dict) -> None:
+    print(f"\n[Step {step_idx + 1}]")
+    print(f"  Agent: {completion[:200].strip()}")
+    if obs.get("last_action_result"):
+        print(f"  Result: {obs['last_action_result']}")
+
+
+def run_episode(model, tokenizer, *, difficulty: int = 1, max_steps: int = 25,
+                env_url: str = "", verbose: bool = True) -> dict:
+    if env_url:
+        env_ctx = SyncEnvClient(env_url)
+        if verbose:
+            print(f"Using remote env: {env_url}")
+    else:
+        env_ctx = _make_local_env(difficulty)
+        if verbose:
+            print("Using local in-process env.")
+
+    generate_fn = make_generate_fn(model, tokenizer)
+
+    with env_ctx as env:
+        state = rollout_episode(
+            env, generate_fn,
+            max_steps=max_steps,
+            difficulty=difficulty,
+            on_step=_on_step if verbose else None,
+        )
+
+    bd = (state.last_observation or {}).get("reward_breakdown") or {}
+    summary = {
+        "actions_taken": state.actions_taken,
+        "steps_used": state.steps_used,
+        "post_fix_status": state.post_fix_status,
+        "locked_hypothesis": state.locked_hypothesis,
+        "true_root_cause": state.true_root_cause or bd.get("true_root_cause"),
+        "reward": state.last_reward,
+        "reward_breakdown": bd,
+        "resolved": state.post_fix_status == "recovered" and "resolve" in state.actions_taken,
+    }
+
+    if verbose:
+        print("\n--- Episode summary ---")
+        for k in ("steps_used", "post_fix_status", "locked_hypothesis", "true_root_cause", "reward"):
+            print(f"  {k}: {summary[k]}")
+        if bd:
+            print(f"  breakdown: {bd}")
+
+    return summary
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="outputs/commander_final", help="Path to trained model")
-    parser.add_argument("--difficulty", type=int, default=1, choices=[1, 2, 3, 4], help="Scenario difficulty")
+    parser.add_argument("--model", type=str, default="outputs/commander_final",
+                        help="Path to trained model")
+    parser.add_argument("--difficulty", type=int, default=1, choices=[1, 2, 3, 4])
+    parser.add_argument("--max-steps", type=int, default=25,
+                        help="Max env steps per episode")
+    parser.add_argument("--episodes", type=int, default=1,
+                        help="How many episodes to evaluate")
     parser.add_argument(
         "--env-url",
         type=str,
-        default=REMOTE_ENV_URL,
-        help="Remote OpenEnv base URL. Empty string uses local environment.",
+        default=os.environ.get("INCIDENT_COMMANDER_ENV_URL", DEFAULT_REMOTE_URL),
+        help="Remote OpenEnv base URL. Empty string => use local env.",
     )
+    parser.add_argument("--quiet", action="store_true", help="Suppress per-step output")
     args = parser.parse_args()
-    
+
     print(f"Loading model from {args.model}...")
     try:
+        from unsloth import FastLanguageModel  # type: ignore
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=args.model,
             max_seq_length=2048,
             load_in_4bit=True,
         )
         FastLanguageModel.for_inference(model)
-        selected_env_url = (args.env_url or "").strip()
-        run_episode(
-            model,
-            tokenizer,
-            difficulty=args.difficulty,
-            env_url=selected_env_url if selected_env_url else None,
-        )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error loading model: {e}")
-        print("Note: If the model is not trained yet, run 'python training.py --run' first.")
+        print("If the model isn't trained yet, run: python training.py --run")
+        return
+
+    rewards: list = []
+    resolved = 0
+    for ep in range(args.episodes):
+        if args.episodes > 1:
+            print(f"\n{'#' * 60}\n# Episode {ep + 1}/{args.episodes}\n{'#' * 60}")
+        summary = run_episode(
+            model, tokenizer,
+            difficulty=args.difficulty,
+            max_steps=args.max_steps,
+            env_url=(args.env_url or "").strip(),
+            verbose=not args.quiet,
+        )
+        rewards.append(summary["reward"])
+        resolved += int(summary["resolved"])
+
+    print(f"\n{'=' * 60}")
+    print(f"Results over {args.episodes} episode(s) (difficulty {args.difficulty})")
+    print(f"  Resolved:    {resolved}/{args.episodes} ({100 * resolved / max(args.episodes, 1):.1f}%)")
+    print(f"  Mean reward: {statistics.mean(rewards):.4f}")
+    if len(rewards) > 1:
+        print(f"  Std  reward: {statistics.pstdev(rewards):.4f}")
+        print(f"  Min  reward: {min(rewards):.4f}")
+        print(f"  Max  reward: {max(rewards):.4f}")
+
 
 if __name__ == "__main__":
     main()

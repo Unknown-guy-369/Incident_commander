@@ -38,12 +38,24 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
+# Resilient imports — work whether `server.app` is run as a module
+# from the repo root, as a top-level script, or as part of the installed
+# `incident_commander` package.
 try:
-    from models import IncidentCommanderAction, IncidentCommanderObservation
-    from incident_commander_environment import IncidentCommanderEnvironment
-except ModuleNotFoundError:
-    from models import IncidentCommanderAction, IncidentCommanderObservation
     from server.incident_commander_environment import IncidentCommanderEnvironment
+    from models import IncidentCommanderAction, IncidentCommanderObservation
+except (ImportError, ModuleNotFoundError):
+    try:
+        from incident_commander_environment import IncidentCommanderEnvironment  # type: ignore
+        from models import IncidentCommanderAction, IncidentCommanderObservation
+    except (ImportError, ModuleNotFoundError):
+        from incident_commander.server.incident_commander_environment import (
+            IncidentCommanderEnvironment,
+        )
+        from incident_commander.models import (
+            IncidentCommanderAction,
+            IncidentCommanderObservation,
+        )
 
 try:
     import gradio as gr

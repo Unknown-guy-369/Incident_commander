@@ -1,1 +1,43 @@
+# Secrets
 .env
+.env.local
+credentials.json
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+
+# Virtual envs (do NOT commit your venv)
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs / OS
+*.log
+logs/
+.DS_Store
+Thumbs.db
+
+# Training artefacts
+outputs/
+checkpoints/
+checkpoint_step*/
+*.bin
+*.pt
+*.pth
+*.tar.gz
+wandb/
+runs/
+.ipynb_checkpoints/

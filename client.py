@@ -1,6 +1,4 @@
-"""
-Client for the Incident Commander Environment.
-"""
+"""Client for the Incident Commander Environment."""
 
 from typing import Dict
 
@@ -8,27 +6,22 @@ from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 from openenv.core.env_server.types import State
 
-from models import IncidentCommanderAction, IncidentCommanderObservation
+# Resilient imports - work as a top-level script and as a packaged module.
+try:
+    from models import IncidentCommanderAction, IncidentCommanderObservation
+except (ImportError, ModuleNotFoundError):
+    try:
+        from incident_commander.models import (
+            IncidentCommanderAction, IncidentCommanderObservation,
+        )
+    except (ImportError, ModuleNotFoundError):
+        from .models import IncidentCommanderAction, IncidentCommanderObservation  # type: ignore
 
 
 class IncidentCommanderEnv(
     EnvClient[IncidentCommanderAction, IncidentCommanderObservation, State]
 ):
-    """
-    Client for the Incident Commander Environment.
-
-    This client maintains a persistent WebSocket connection to the environment server,
-    enabling efficient multi-step interactions with lower latency.
-
-    Example:
-        >>> with IncidentCommanderEnv(base_url="http://localhost:8000") as env:
-        ...     result = env.reset()
-        ...     print(result.observation.alert_summary)
-        ...     result = env.step(IncidentCommanderAction(
-        ...         action_type="read_logs",
-        ...         target_service="payment-service",
-        ...     ))
-    """
+    """Client for the Incident Commander Environment."""
 
     def _step_payload(self, action: IncidentCommanderAction) -> Dict:
         payload = {

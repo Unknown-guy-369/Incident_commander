@@ -6,10 +6,10 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ..models import IncidentCommanderAction
-from ..simulator import ALL_SCENARIOS, CORRECT_FIX, VALID_ROOT_CAUSES, Simulator
-from ..rewards import compute_total_reward, MIN_INVESTIGATION_STEPS
-from ..server.incident_commander_environment import IncidentCommanderEnvironment
+from models import IncidentCommanderAction
+from simulator import ALL_SCENARIOS, CORRECT_FIX, VALID_ROOT_CAUSES, Simulator
+from rewards import compute_total_reward, MIN_INVESTIGATION_STEPS
+from server.incident_commander_environment import IncidentCommanderEnvironment
 
 PASS = "[PASS]"
 FAIL = "[FAIL]"

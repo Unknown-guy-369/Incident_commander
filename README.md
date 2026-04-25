@@ -1,6 +1,6 @@
 ---
-title: Incident Commander Environment Server
-emoji: 🎣
+title: Incident Commander Environment
+emoji: 🚨
 colorFrom: purple
 colorTo: red
 sdk: docker
@@ -9,53 +9,101 @@ app_port: 8000
 base_path: /web
 tags:
   - openenv
+  - rl-environment
+  - sre
+  - causal-reasoning
+  - theme-3-1
 ---
 
-# Incident Commander Environment
+# AI Incident Commander
 
-An OpenEnv RL environment where an AI agent investigates and resolves microservice outages. Theme 3.1 compliant: real stateful tool interactions, partial observability, causal chain scenarios, multi-round fix loops, and 4 independent reward signals.
+An OpenEnv RL environment that trains LLMs to investigate and resolve
+microservice outages. Theme **3.1 — Professional Tasks**: real stateful
+tool interactions, partial observability, causal-chain scenarios,
+multi-round fix loops, and four anti-shortcut reward signals.
 
-## Quick Start
+> **Live environment:** [`abishek-priyan-369-incident-commander.hf.space`](https://abishek-priyan-369-incident-commander.hf.space)
+> **Training notebook:** [`colab/incident_commander_training.ipynb`](colab/incident_commander_training.ipynb)
+> **Results plots:** [`assets/before_after_comparison.png`](assets/before_after_comparison.png) · [`assets/per_signal_comparison.png`](assets/per_signal_comparison.png)
+
+---
+
+## 1. Why this environment exists
+
+Most LLM-as-agent benchmarks reward the model for *answering* well. SRE
+incident response rewards an agent for *acting* well: first investigate,
+then commit to a hypothesis, then apply a matching fix, then verify the
+fix worked, and only then close the incident. Skip any of those steps
+and the system stays broken.
+
+Static prompt → answer datasets cannot teach this. Incident Commander
+gives the model:
+
+- **Partial observability** — only the alert + service overview is
+  visible at reset. Logs, metrics, deployment history and the dependency
+  graph are hidden until the agent explicitly fetches them.
+- **Causal chains** — Redis down → Auth slow → API timeouts → Payment
+  failing. Symptoms are downstream; the agent must trace the chain back.
+- **Dynamic randomisation** — every episode reshuffles CPU %, error
+  rates, log timestamps and red-herring services. You cannot memorise
+  "CPU > 90 % means traffic spike."
+- **Anti-shortcut enforcement** — fix actions are *blocked* until the
+  agent has read at least 3 distinct log/metric sources AND committed a
+  hypothesis. `resolve` is blocked until the post-fix status is
+  `recovered`.
+- **Four reward signals** logged independently:
+  service recovery, root-cause accuracy, action quality, speed.
+
+## 2. Quick start (client side)
 
 ```python
-from incident_commander import IncidentCommanderEnv, IncidentCommanderAction
+from rollout import SyncEnvClient
 
-# Connect to the deployed Space or local server
-env = IncidentCommanderEnv(base_url="http://localhost:8000")
-obs = env.reset()
-print(obs.alert_summary)   # e.g. "[CRITICAL] PagerDuty: payment-service error rate critical"
+with SyncEnvClient("https://abishek-priyan-369-incident-commander.hf.space") as env:
+    obs = env.reset(difficulty=1)["observation"]
+    print(obs["alert_summary"])  # e.g. "[CRITICAL] PagerDuty: payment-service error rate critical"
 
-# Investigate
-obs = env.step(IncidentCommanderAction(
-    action_type="read_logs",
-    target_service="payment-service",
-))
-print(obs.revealed_logs)
+    # Investigate
+    env.step(action_type="read_logs", target_service="payment-service")
+    env.step(action_type="read_metrics", target_service="payment-service")
+    env.step(action_type="read_deployment_history")
 
-# Lock hypothesis
-obs = env.step(IncidentCommanderAction(
-    action_type="identify_cause",
-    target_service="payment-service",
-    hypothesis="memory_limit_too_low",
-))
+    # Lock hypothesis
+    env.step(action_type="identify_cause",
+             target_service="payment-service",
+             hypothesis="memory_limit_too_low")
 
-# Apply fix
-obs = env.step(IncidentCommanderAction(
-    action_type="scale_up",
-    target_service="payment-service",
-))
+    # Apply matching fix
+    env.step(action_type="scale_up", target_service="payment-service")
 
-# Monitor and resolve
-obs = env.step(IncidentCommanderAction(action_type="monitor_recovery"))
-obs = env.step(IncidentCommanderAction(action_type="resolve", justification="Service recovered"))
-
-env.close()
+    # Verify and close
+    env.step(action_type="monitor_recovery")
+    final = env.step(action_type="resolve", justification="service recovered")
+    print("Final reward:", final["reward"])
+    print("Breakdown:",   final["observation"]["reward_breakdown"])
 ```
 
-## Root Cause → Fix Reference
+## 3. Action schema
 
-| Root Cause | Correct Fix |
-|------------|-------------|
+| Action | Target | Extra | Purpose |
+|---|---|---|---|
+| `read_logs` | yes | `time_range_minutes` | Fetch recent logs |
+| `read_metrics` | yes | — | CPU / memory / error rate / p99 |
+| `read_deployment_history` | no | — | Recent deploys |
+| `read_dependency_graph` | no | — | Service-call graph |
+| `identify_cause` | yes | `hypothesis` | Lock root-cause hypothesis |
+| `restart_pod` | yes | — | Restart the pod |
+| `rollback` | yes | — | Revert latest deploy |
+| `scale_up` | yes | — | Add compute |
+| `hotfix` | yes | — | Patch config / cert / pool |
+| `escalate` | no | `justification` | Page a human |
+| `monitor_recovery` | no | — | Observe post-fix status |
+| `resolve` | no | `justification` | Close the incident |
+
+### Root cause → correct fix
+
+| Root cause | Fix |
+|---|---|
 | `memory_limit_too_low` | `scale_up` |
 | `bad_deployment` | `rollback` |
 | `connection_pool_exhausted` | `hotfix` |
@@ -65,175 +113,146 @@ env.close()
 | `redis_down` | `restart_pod` |
 | `certificate_expired` | `hotfix` |
 
-## Advanced Usage
+## 4. Reward design
 
-### Connecting to an Existing Server
+All four signals fire only when the episode terminates (resolve or timeout).
+They are exposed individually to GRPO via `rewards.make_grpo_reward_fns(...)`
+so the trainer logs each one independently.
 
-If you already have a Incident Commander environment server running, you can connect directly:
+| Signal | Range | What it captures |
+|---|---|---|
+| `service_recovery` | -20 .. +30 | Did the fix work? `+30 recovered`, `+5 degraded`, `-15 worse`, `-20 no fix applied` |
+| `root_cause_accuracy` | -15 .. +25 | `+25` correct hypothesis locked *before* fix; `-10` wrong; `-15` no hypothesis |
+| `action_quality` | -85 .. +5 | Anti-shortcuts: fix-without-investigation `-15`, fix-mismatches-hypothesis `-20`, rollback-spam `-50`, escalation-spam `-30`, resolve-without-reading `-25`. Bonus `+5` for log+metric coverage |
+| `speed` | 0 .. +15 | `(steps_remaining/50) × 15` — paid only on `recovered` |
 
-```python
-from incident_commander import IncidentCommanderEnv, IncidentCommanderAction
+The clamped aggregate `[0, 1]` is what the env's `step` returns. For RL
+training, prefer `compute_signed_reward(...)` (also in `rewards.py`),
+which keeps negative advantage so the gradient does not collapse.
 
-# Connect to existing server
-env = IncidentCommanderEnv(base_url="http://localhost:8000")
-
-# Use as normal
-obs = env.reset()
-obs = env.step(IncidentCommanderAction(
-    action_type="read_logs",
-    target_service="payment-service",
-))
-```
-
-Note: When connecting to an existing server, `env.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from incident_commander import IncidentCommanderEnv, IncidentCommanderAction
-
-with IncidentCommanderEnv(base_url="http://localhost:8000") as env:
-    obs = env.reset()
-    for svc in ["payment-service", "auth-service"]:
-        obs = env.step(IncidentCommanderAction(
-            action_type="read_logs",
-            target_service=svc,
-        ))
-        print(f"Logs for {svc}: {obs.revealed_logs.get(svc)}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports up to 16 concurrent WebSocket connections (configured in `server/app.py`):
-
-```python
-from incident_commander import IncidentCommanderEnv, IncidentCommanderAction
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with IncidentCommanderEnv(base_url="http://localhost:8000") as env:
-        env.reset()
-        for i in range(10):
-            obs = env.step(IncidentCommanderAction(
-                action_type="read_logs",
-                target_service="payment-service",
-            ))
-        return client_id, obs.reward
-
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
-
-```bash
-# From the server directory
-python3 server/incident_commander_environment.py
-```
-
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
-
-```bash
-uvicorn server.app:app --reload
-```
-
-## Project Structure
+## 5. Project layout
 
 ```
 incident_commander/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md            # This file
-├── DEPLOY.md            # HuggingFace + Colab deployment guide
-├── openenv.yaml         # OpenEnv manifest
-├── pyproject.toml       # Project metadata and dependencies
+├── README.md                 # this file
+├── DEPLOY.md                 # HF Space + Colab deployment guide
+├── REVIEW.md                 # internal review notes
+├── HACKATHON_MEMORY.md       # team memory document
+├── pyproject.toml
+├── requirements.txt          # local dev / training deps
+├── openenv.yaml              # OpenEnv manifest
+├── Dockerfile                # HF Space build (root)
+├── app.py                    # uvicorn entry point used by Dockerfile
+│
+├── __init__.py
+├── client.py                 # IncidentCommanderEnv (async openenv client)
+├── rollout.py                # SyncEnvClient + multi-turn rollout
+├── models.py                 # Pydantic Action / Observation
+├── simulator.py              # 8 scenarios + dynamic log/metric generators
+├── rewards.py                # 4 reward signals + GRPO factory
+├── training.py               # CLI training driver
+├── inference.py              # local trained-model evaluation
+├── inference_openrouter.py   # OpenRouter (Claude / GPT / Gemini) baseline
+│
+├── server/
+│   ├── app.py                # FastAPI + Gradio /web UI
+│   ├── incident_commander_environment.py
+│   ├── Dockerfile            # alternative server-only image
+│   ├── requirements.txt      # runtime-only deps for HF Space
+│   └── __init__.py
+│
 ├── colab/
-│   └── incident_commander_training.ipynb  # Colab training notebook
-├── client.py            # IncidentCommanderEnv client
-├── models.py            # Action and Observation models
-├── rewards.py           # 4-signal reward functions
-├── simulator.py        # Scenario bank + log/metric generators
-├── training.py         # GRPO + Unsloth training script
-├── inference.py        # Trained model evaluation
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── incident_commander_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile        # Container image definition
-
-## Phase 3: Model Training (TRL GRPO + Unsloth)
-
-We've set up an RL training pipeline explicitly designed for Theme 3.1 compliance. Using Unsloth for ultra-fast generation and TRL's internal GRPO algorithm, this pipeline uses proximal policy optimization over multiple environment steps.
-
-### Training
-
-To execute the training loop (requires Unsloth, TRL, pyarrow etc.):
-```bash
-python training.py --run
+│   └── incident_commander_training.ipynb
+│
+├── tests/
+│   ├── smoke_test.py
+│   ├── test_env.py
+│   └── test_training.py
+│
+└── assets/                   # plots produced by the notebook
+    ├── before_after_comparison.png
+    └── per_signal_comparison.png
 ```
 
-This starts by loading `unsloth/Llama-3.2-1B-Instruct` and fine-tunes it natively against the `IncidentCommanderEnvironment`. The trainer simulates `identify_cause`, `read_logs`, etc., directly extracting the reward computed by our 4 anti-shortcut reward modules.
+## 6. Running the training
 
-The trained model saves to `outputs/commander_final`.
+### A. Colab (recommended)
 
-### Inference Evaluation
+Open `colab/incident_commander_training.ipynb`, run cells top-to-bottom.
+The notebook:
 
-To evaluate the trained model iteratively interacting with an episode inside the environment:
-```bash
-python inference.py --model outputs/commander_final --difficulty 1
-```
+1. Installs pinned deps (Unsloth + TRL + OpenEnv-core).
+2. Loads `unsloth/Llama-3.2-1B-Instruct` in 4-bit + LoRA r=16.
+3. Builds **multi-turn rollout reward functions** — each completion runs
+   a full episode against the live HF Space.
+4. Runs a 15-episode evaluation **before** training.
+5. Trains with `GRPOTrainer` for 200 steps on difficulty 1.
+6. Saves the merged model and runs a 15-episode evaluation **after**.
+7. Saves both before/after plots to `assets/`.
 
-The script runs the model through a 50-step max causal scenario until it correctly issues a resolve action or runs out of time.
-
----
-
-## Deployment
-
-### Hugging Face Spaces
-
-Deploy the environment as a shareable Hugging Face Space:
+### B. Locally
 
 ```bash
-# Build Docker image
-docker build -t incident_commander-env:latest -f server/Dockerfile .
+# Train
+INCIDENT_COMMANDER_ENV_URL=https://abishek-priyan-369-incident-commander.hf.space \
+python training.py --run --max-steps 200 --difficulty 1
 
-# Push to Hugging Face Spaces
-openenv push
+# Evaluate
+python inference.py --model outputs/commander_final --episodes 20
+
+# Sanity-check the env logic
+python tests/smoke_test.py
+pytest tests/test_env.py -v
 ```
 
-See [DEPLOY.md](DEPLOY.md) for full instructions including client connection examples.
+## 7. Results
 
-### Google Colab Training
+> Plots are produced by Cell 11 of the Colab notebook; embed once you
+> have a real run.
 
-Open `colab/incident_commander_training.ipynb` in Colab for a complete training notebook with:
+![Before vs After GRPO (avg reward, resolve rate, root-cause accuracy)](assets/before_after_comparison.png)
 
-- One-click dependency installation
-- Unsloth 4-bit quantized model loading
-- GRPO trainer with dual reward functions
-- Evaluation episode runner
-- Model download / push to Hugging Face Hub
+![Per-signal reward — before vs after](assets/per_signal_comparison.png)
 
-**Quick start in Colab:**
-```bash
-!pip install -q openenv-core[core] unsloth trl datasets peft accelerate bitsandbytes scipy
-!python training.py --run
-```
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Avg episode reward | _fill in_ | _fill in_ | _fill in_ |
+| Resolve rate | _fill in_ | _fill in_ | _fill in_ |
+| Root-cause accuracy | _fill in_ | _fill in_ | _fill in_ |
+
+(See `colab/incident_commander_training.ipynb` Cell 11 for the script
+that generated these.)
+
+## 8. What makes this submission distinctive
+
+- **Anti-shortcut enforcement is in the environment, not just the reward.**
+  Fix actions are *blocked* (not merely penalised) when investigation is
+  insufficient, and `resolve` is blocked unless `monitor_recovery`
+  reported `recovered`. An LLM cannot bypass these by clever output
+  formatting — the env is the verifier.
+- **Four independently-logged reward channels.** Per the
+  *What-Judges-Look-For* guide: "OpenEnv's Rubric system thoughtfully
+  (composable rubrics > monolithic scoring)." Our `make_grpo_reward_fns`
+  exposes one TRL reward function per signal so wandb / TRL logs show
+  four curves out of the box.
+- **Dynamic scenarios.** 8 root cause types × randomised numbers ×
+  red-herring services per episode. Memorising symptom→fix is impossible.
+- **Multi-hop causal chains.** `redis_down` propagates Redis→Auth→API.
+  The agent must trace the dependency graph upstream.
+
+## 9. Links
+
+- Live env (HF Space): `https://abishek-priyan-369-incident-commander.hf.space`
+  - `/web` — interactive Gradio UI
+  - `/docs` — OpenAPI schema
+  - `/health` — health check
+- Training notebook: [`colab/incident_commander_training.ipynb`](colab/incident_commander_training.ipynb)
+- Deployment guide: [`DEPLOY.md`](DEPLOY.md)
+
+## 10. Citing / acknowledgements
+
+Built on:
+
+- [OpenEnv](https://github.com/meta-pytorch/OpenEnv) (Meta PyTorch)
+- [TRL GRPO Trainer](https://huggingface.co/docs/trl/main/en/grpo_trainer) (Hugging Face)
+- [Unsloth](https://github.com/unslothai/unsloth) for memory-efficient fine-tuning

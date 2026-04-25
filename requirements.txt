@@ -1,12 +1,34 @@
-# Project dependencies for Incident Commander
-# Python runtime requirement: >=3.10
-torch
+# Top-level requirements for local development & training.
+# (Server-only deps live in server/requirements.txt to keep the HF Space image small.)
+
+# Core OpenEnv runtime
 openenv-core[core]>=0.2.2
+
+# FastAPI server (runtime)
 fastapi>=0.115.0
 uvicorn>=0.24.0
-datasets
-unsloth
-openai
-# Development/test dependencies
+gradio>=4.44.0
+
+# HTTP client for SyncEnvClient
+requests>=2.31.0
+
+# Training stack — install only when actually training (not for HF Space deploy)
+torch>=2.4.0,<2.6.0
+trl>=0.12.0,<0.14.0
+datasets>=2.20.0
+peft>=0.11.0
+accelerate>=0.33.0
+bitsandbytes>=0.43.0
+# Unsloth — pin to a known-good build; latest releases occasionally break GRPO
+# unsloth>=2025.10.0  ; uncomment locally; do NOT include in the HF Space image
+
+# Inference (OpenRouter scripts)
+openai>=1.40.0
+
+# Plotting / data
+numpy>=1.26.0
+matplotlib>=3.8.0
+
+# Test deps
 pytest>=8.0.0
 pytest-cov>=4.0.0

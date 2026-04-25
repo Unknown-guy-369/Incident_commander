@@ -69,13 +69,39 @@ Root cause → correct fix reference:
 # ---------------------------------------------------------------------------
 
 def parse_action(completion: str) -> tuple[Optional[str], Optional[str]]:
-    """Extract action_type and target_service from <action> tags."""
-    match = re.search(r"<action>([^:<]+):([^<]+)</action>", completion)
+    """Extract action_type and target_service from <action> tags.
+
+    Tolerant to whitespace, newlines, and the colon being optional (some
+    actions like resolve/escalate don't take a target).
+    """
+    match = re.search(
+        r"<action>\s*([^:<\n]+?)\s*(?::\s*([^<\n]+?))?\s*</action>",
+        completion,
+        re.DOTALL,
+    )
     if match:
         action_type = match.group(1).strip()
-        target = match.group(2).strip()
-        return action_type, target
+        target = match.group(2).strip() if match.group(2) else ""
+        return action_type, target or None
     return None, None
+
+
+def parse_hypothesis(completion: str) -> Optional[str]:
+    """Pulls a root-cause name out of <hypothesis>...</hypothesis> if present,
+    otherwise scans for any of the 8 valid hypothesis tokens."""
+    valid = (
+        "memory_limit_too_low", "bad_deployment", "connection_pool_exhausted",
+        "traffic_spike", "dependency_failure", "config_error",
+        "redis_down", "certificate_expired",
+    )
+    m = re.search(r"<hypothesis>\s*([^<\n]+?)\s*</hypothesis>", completion, re.DOTALL)
+    if m:
+        candidate = m.group(1).strip()
+        return candidate
+    for h in valid:
+        if h in completion:
+            return h
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +217,12 @@ def run_episode(
 
     total_reward = 0.0
     steps = []
+    parse_failures = 0
+
+    NO_TARGET_ACTIONS = {
+        "read_deployment_history", "read_dependency_graph",
+        "monitor_recovery", "escalate", "resolve",
+    }
 
     for step in range(max_steps):
         if verbose:
@@ -202,7 +234,8 @@ def run_episode(
         prompt = (
             f"Current observation:\n{obs_text}\n\n"
             "What is your next action? "
-            "Output reasoning in <thought> then action in <action> tags."
+            "Output reasoning in <thought> then action in <action> tags. "
+            "For identify_cause also include <hypothesis>name</hypothesis>."
         )
 
         # Query LLM
@@ -211,32 +244,39 @@ def run_episode(
             print(f"Model: {response.model} | Tokens: {response.usage['total_tokens']}")
             print(f"\nLLM Output:\n{response.content[:500]}")
 
-        # Parse action
+        # Parse action — DO NOT inject a default action on parse failure.
+        # We track it honestly so the eval reflects model behaviour.
         action_type, target = parse_action(response.content)
         if not action_type:
-            msg = "No valid <action> tag found. Skipping step."
+            parse_failures += 1
             if verbose:
-                print(f"⚠️  {msg}")
-            obs = env.step(IncidentCommanderAction(
-                action_type="read_logs",
-                target_service="payment-service",
-            ))
-            total_reward = obs.reward
-            steps.append({"step": step + 1, "action": "PARSE_ERROR", "target": None})
+                print("⚠️  No valid <action> tag found. Counting as a wasted step.")
+            steps.append({"step": step + 1, "action": "__parse_error__", "target": None})
             continue
 
-        # Handle no-target actions (use a default)
-        if not target:
-            target = "payment-service"
+        # Only inject a default target for actions that legitimately need one
+        # AND the model failed to provide one.
+        if not target and action_type not in NO_TARGET_ACTIONS:
+            if verbose:
+                print(f"⚠️  Missing target for {action_type}; falling back to root service heuristic.")
+            target = (obs.services_overview[0]["name"] if obs.services_overview else "payment-service")
 
         if verbose:
             print(f"→ Action: {action_type} | Target: {target}")
 
-        # Execute in environment
+        # Execute in environment — pass hypothesis if applicable.
         try:
+            kwargs: dict = {}
+            if action_type == "identify_cause":
+                hypothesis = parse_hypothesis(response.content)
+                if hypothesis:
+                    kwargs["hypothesis"] = hypothesis
+            if action_type in {"escalate", "resolve"}:
+                kwargs["justification"] = "agent decision"
             obs = env.step(IncidentCommanderAction(
                 action_type=action_type,
                 target_service=target,
+                **kwargs,
             ))
         except Exception as e:
             if verbose:
@@ -270,6 +310,7 @@ def run_episode(
         "done": obs.done,
         "total_reward": total_reward,
         "steps": steps,
+        "parse_failures": parse_failures,
         "reward_breakdown": obs.reward_breakdown,
         "final_result": obs.last_action_result,
     }
