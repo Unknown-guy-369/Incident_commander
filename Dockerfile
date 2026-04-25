@@ -3,8 +3,7 @@
 # Compatible with Hugging Face Spaces (Docker SDK) and local Docker builds.
 #
 # NOTE: HuggingFace Spaces (sdk: docker) requires the Dockerfile to be at the
-# root of the Space repository. This file lives at the repo root and mirrors
-# the build defined in server/Dockerfile.
+# root of the Space repository.
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
@@ -58,18 +57,18 @@ COPY --from=builder /app/env /app/env
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Set PYTHONPATH so all relative imports work correctly
-ENV PYTHONPATH="/app/env:$PYTHONPATH"
+# (Do NOT append to $PYTHONPATH — it is undefined in a fresh image)
+ENV PYTHONPATH="/app/env"
 
-# Hugging Face Spaces uses port 7860 by default; fall back to 8000 locally.
-ENV PORT=7860
+# Must match app_port in README.md front matter (8000).
+# HF Spaces proxies external traffic to this port.
+ENV PORT=8000
 
-# Health check
+# Health check — /health is registered by openenv's create_app
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Expose both the HF default port and the local dev port
-EXPOSE 7860
 EXPOSE 8000
 
 # Launch the FastAPI server
-CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-7860}"]
+CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
