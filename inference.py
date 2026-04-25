@@ -9,9 +9,15 @@ import argparse
 from unsloth import FastLanguageModel
 
 from server.incident_commander_environment import IncidentCommanderEnvironment
+from client import IncidentCommanderEnv
 from models import IncidentCommanderAction
 
 import re
+
+REMOTE_ENV_URL = os.environ.get(
+    "INCIDENT_COMMANDER_ENV_URL",
+    "https://abishek-priyan-369-incident-commander.hf.space",
+).rstrip("/")
 
 # Format tag parsing
 def parse_action(completion: str):
@@ -22,9 +28,17 @@ def parse_action(completion: str):
         return atype, target
     return None, None
 
-def run_episode(model, tokenizer, difficulty=1, max_steps=50):
+def run_episode(model, tokenizer, difficulty=1, max_steps=50, env_url=None):
     print(f"\n--- Starting Evaluation Episode (Difficulty {difficulty}) ---")
-    env = IncidentCommanderEnvironment(difficulty=difficulty)
+    use_remote_env = bool(env_url)
+
+    if use_remote_env:
+        print(f"Using remote environment: {env_url}")
+        env = IncidentCommanderEnv(base_url=env_url)
+    else:
+        print("Using local in-process environment.")
+        env = IncidentCommanderEnvironment(difficulty=difficulty)
+
     obs = env.reset()
     
     system_prompt = """You are an AI Incident Commander.
@@ -59,8 +73,11 @@ Action format: <action>action_name:target_service</action>"""
         print(f"Action parsed: {action_type} on {target}")
         
         # Step the environment
-        obs = env.step(IncidentCommanderAction(action_type=action_type, target_service=target))
-        total_reward = obs.reward
+        step_result = env.step(
+            IncidentCommanderAction(action_type=action_type, target_service=target)
+        )
+        obs = step_result.observation if use_remote_env else step_result
+        total_reward = float(step_result.reward)
         
         if obs.done:
             print(f"\n✅ Episode finished! Final result: {obs.last_action_result}")
@@ -71,11 +88,19 @@ Action format: <action>action_name:target_service</action>"""
             
     if not obs.done:
         print("\n❌ Episode timed out!")
+    if use_remote_env:
+        env.close()
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="outputs/commander_final", help="Path to trained model")
     parser.add_argument("--difficulty", type=int, default=1, choices=[1, 2, 3, 4], help="Scenario difficulty")
+    parser.add_argument(
+        "--env-url",
+        type=str,
+        default=REMOTE_ENV_URL,
+        help="Remote OpenEnv base URL. Empty string uses local environment.",
+    )
     args = parser.parse_args()
     
     print(f"Loading model from {args.model}...")
@@ -86,7 +111,13 @@ def main():
             load_in_4bit=True,
         )
         FastLanguageModel.for_inference(model)
-        run_episode(model, tokenizer, difficulty=args.difficulty)
+        selected_env_url = (args.env_url or "").strip()
+        run_episode(
+            model,
+            tokenizer,
+            difficulty=args.difficulty,
+            env_url=selected_env_url if selected_env_url else None,
+        )
     except Exception as e:
         print(f"Error loading model: {e}")
         print("Note: If the model is not trained yet, run 'python training.py --run' first.")

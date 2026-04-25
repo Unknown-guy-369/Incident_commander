@@ -38,8 +38,8 @@ class IncidentCommanderAction(Action):
     action_type: ActionType = Field(
         ..., description="Type of action to perform."
     )
-    target_service: str = Field(
-        ..., description="The service this action targets."
+    target_service: Optional[str] = Field(
+        None, description="The service this action targets (optional for some actions, like resolve)."
     )
     hypothesis: Optional[str] = Field(
         None,

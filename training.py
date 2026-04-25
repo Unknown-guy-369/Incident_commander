@@ -15,6 +15,7 @@ from trl import GRPOConfig, GRPOTrainer
 
 # Import our environment
 from server.incident_commander_environment import IncidentCommanderEnvironment
+from client import IncidentCommanderEnv
 from models import IncidentCommanderAction
 
 # --- 1. Configuration ---
@@ -24,6 +25,15 @@ LORA_RANK = 16
 BATCH_SIZE = 8
 GRAD_ACCUM_STEPS = 4
 LEARNING_RATE = 2e-5
+REMOTE_ENV_URL = os.environ.get(
+    "INCIDENT_COMMANDER_ENV_URL",
+    "https://abishek-priyan-369-incident-commander.hf.space",
+).rstrip("/")
+
+
+def _use_remote_env() -> bool:
+    """Use remote env when INCIDENT_COMMANDER_ENV_URL is configured."""
+    return bool(REMOTE_ENV_URL)
 
 # --- 2. Prompts & Dataset ---
 SYSTEM_PROMPT = """You are an AI Incident Commander.
@@ -34,21 +44,31 @@ Action format: <action>action_name:target_service</action>"""
 def generate_initial_prompts(num_samples=100, difficulty=1):
     """Generate initial environment states for GRPO."""
     prompts = []
-    
-    for _ in range(num_samples):
-        env = IncidentCommanderEnvironment(difficulty=difficulty)
-        obs = env.reset()
-        
-        # Format the starting observation
-        prompt = f"System: {SYSTEM_PROMPT}\n\nObservation: {obs.alert_summary}\n"
-        prompt += f"Services Overview: {obs.services_overview}\n\n"
-        prompt += "What is your next action?"
-        
-        prompts.append({
-            "prompt": prompt,
-            "seed": env._ctx.scenario.seed if env._ctx else 0
-        })
-        
+
+    if _use_remote_env():
+        # Remote OpenEnv API: use reset/step through EnvClient over HTTP+WebSocket.
+        with IncidentCommanderEnv(base_url=REMOTE_ENV_URL) as env:
+            for _ in range(num_samples):
+                obs = env.reset()
+                prompt = f"System: {SYSTEM_PROMPT}\n\nObservation: {obs.alert_summary}\n"
+                prompt += f"Services Overview: {obs.services_overview}\n\n"
+                prompt += "What is your next action?"
+                prompts.append({"prompt": prompt, "seed": 0})
+    else:
+        for _ in range(num_samples):
+            env = IncidentCommanderEnvironment(difficulty=difficulty)
+            obs = env.reset()
+
+            # Format the starting observation
+            prompt = f"System: {SYSTEM_PROMPT}\n\nObservation: {obs.alert_summary}\n"
+            prompt += f"Services Overview: {obs.services_overview}\n\n"
+            prompt += "What is your next action?"
+
+            prompts.append({
+                "prompt": prompt,
+                "seed": env._ctx.scenario.seed if env._ctx else 0
+            })
+
     return Dataset.from_list(prompts)
 
 # --- 3. Reward Functions ---
@@ -68,27 +88,35 @@ def environment_reward_func(prompts, completions, **kwargs):
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
-        # We can extract the seed from kwargs if we passed it, or just use difficulty 1
-        env = IncidentCommanderEnvironment(difficulty=1)
-        env.reset()
-        
+
         # Extract the action from the completion
         action_type, target = parse_action(completion)
-        
+
         if not action_type:
             # Failed to follow generation format
             rewards.append(0.0)
             continue
-            
+
         # Execute the step in the environment
         try:
-            obs = env.step(IncidentCommanderAction(action_type=action_type, target_service=target))
-            # Env returns reward in [0, 1] range; GRPOTrainer handles positive/critical rewards
-            rewards.append(obs.reward)
+            action = IncidentCommanderAction(
+                action_type=action_type,
+                target_service=target,
+            )
+            if _use_remote_env():
+                with IncidentCommanderEnv(base_url=REMOTE_ENV_URL) as env:
+                    env.reset()
+                    step_result = env.step(action)
+                    rewards.append(float(step_result.reward))
+            else:
+                env = IncidentCommanderEnvironment(difficulty=1)
+                env.reset()
+                obs = env.step(action)
+                rewards.append(float(obs.reward))
         except Exception as e:
             print(f"Env error: {e}")
             rewards.append(0.0)
-            
+
     return rewards
 
 def format_reward_func(prompts, completions, **kwargs):
@@ -105,6 +133,10 @@ def format_reward_func(prompts, completions, **kwargs):
 
 # --- 4. Main Training Loop ---
 def main():
+    if _use_remote_env():
+        print(f"Using remote environment: {REMOTE_ENV_URL}")
+    else:
+        print("Using local in-process environment.")
     print("Loading lightweight model via Unsloth...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_NAME,
