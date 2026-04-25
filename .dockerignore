@@ -1,8 +1,8 @@
-# Git
+# VCS
 .git/
 .gitignore
 
-# Python
+# Python build artefacts
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -22,21 +22,37 @@ env/
 *.swp
 *.swo
 
-# Logs
+# Logs / OS
 *.log
 logs/
-
-# Models (generated during training)
-outputs/
-*.bin
-*.pt
-*.pth
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Confidential
+# Training artefacts (never deployed to the Space)
+outputs/
+checkpoints/
+checkpoint_step*/
+*.bin
+*.pt
+*.pth
+*.tar.gz
+wandb/
+runs/
+.ipynb_checkpoints/
+
+# Notebooks and assets - the Space serves the API, not the training UI
+colab/
+assets/
+tests/
+REVIEW.md
+HACKATHON_MEMORY.md
+
+# Top-level training script (the Space only needs the server)
+training.py
+inference.py
+inference_openrouter.py
+
+# Secrets
 *.env
 .env.local
 credentials.json

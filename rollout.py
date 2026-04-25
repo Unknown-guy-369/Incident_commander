@@ -247,6 +247,10 @@ class EpisodeState:
     transcript: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        bd = (self.last_observation or {}).get("reward_breakdown") or {}
+        # Coerce reward_breakdown into a dict in case it's something weird
+        if not isinstance(bd, dict):
+            bd = {}
         return {
             "post_fix_status": self.post_fix_status,
             "locked_hypothesis": self.locked_hypothesis,
@@ -259,6 +263,11 @@ class EpisodeState:
             "steps_used": self.steps_used,
             "read_root_service": self.read_root_service,
             "last_reward": self.last_reward,
+            # Server-authoritative per-signal scores. Both the old (deployed
+            # HF Space) and the new server populate these; only the new one
+            # ships `true_root_cause`/`root_service`. The GRPO reward
+            # functions therefore prefer reading from this breakdown.
+            "reward_breakdown": dict(bd),
         }
 
 

@@ -304,36 +304,60 @@ def make_grpo_reward_fns(rollout_fn):
             out.append(_cache["data"][k])
         return out
 
+    def _bd(s):
+        """Server-authoritative breakdown (numbers only); empty dict if absent."""
+        bd = s.get("reward_breakdown") or {}
+        return bd if isinstance(bd, dict) else {}
+
     def recovery_fn(prompts, completions, **kwargs):
         states = _gather_states(prompts, completions)
-        return [reward_service_recovery(s["post_fix_status"]) / 30.0 for s in states]
+        out = []
+        for s in states:
+            bd = _bd(s)
+            if "service_recovery" in bd:
+                out.append(float(bd["service_recovery"]) / 30.0)
+            else:
+                out.append(reward_service_recovery(s["post_fix_status"]) / 30.0)
+        return out
 
     def root_cause_fn(prompts, completions, **kwargs):
         states = _gather_states(prompts, completions)
-        return [
-            reward_root_cause_accuracy(
-                s["locked_hypothesis"], s["true_root_cause"], s["actions_taken"]
-            ) / 25.0
-            for s in states
-        ]
+        out = []
+        for s in states:
+            bd = _bd(s)
+            if "root_cause_accuracy" in bd:
+                out.append(float(bd["root_cause_accuracy"]) / 25.0)
+            else:
+                out.append(reward_root_cause_accuracy(
+                    s["locked_hypothesis"], s["true_root_cause"], s["actions_taken"]
+                ) / 25.0)
+        return out
 
     def action_quality_fn(prompts, completions, **kwargs):
         states = _gather_states(prompts, completions)
-        return [
-            reward_action_quality(
-                s["actions_taken"], s["locked_hypothesis"], s["true_root_cause"],
-                s["rollback_count"], s["escalation_count"],
-                s["already_read_logs"], s["already_read_metrics"],
-            ) / 50.0
-            for s in states
-        ]
+        out = []
+        for s in states:
+            bd = _bd(s)
+            if "action_quality" in bd:
+                out.append(float(bd["action_quality"]) / 50.0)
+            else:
+                out.append(reward_action_quality(
+                    s["actions_taken"], s["locked_hypothesis"], s["true_root_cause"],
+                    s["rollback_count"], s["escalation_count"],
+                    s["already_read_logs"], s["already_read_metrics"],
+                ) / 50.0)
+        return out
 
     def speed_fn(prompts, completions, **kwargs):
         states = _gather_states(prompts, completions)
-        return [
-            reward_speed(s["post_fix_status"], s["steps_used"]) / 15.0
-            for s in states
-        ]
+        out = []
+        for s in states:
+            bd = _bd(s)
+            if "speed" in bd:
+                out.append(float(bd["speed"]) / 15.0)
+            else:
+                out.append(reward_speed(s["post_fix_status"], s["steps_used"]) / 15.0)
+        return out
 
     def shaping_fn(prompts, completions, **kwargs):
         states = _gather_states(prompts, completions)

@@ -1,74 +1,39 @@
-# Incident Commander Environment — Docker Image
-# Multi-stage build using a standard public Python base image.
-# Compatible with Hugging Face Spaces (Docker SDK) and local Docker builds.
+# Incident Commander Environment - Hugging Face Spaces Docker image.
 #
-# NOTE: HuggingFace Spaces (sdk: docker) requires the Dockerfile to be at the
-# root of the Space repository.
+# HF Spaces (sdk: docker) requires this Dockerfile at the repo root.
+# Single-stage, slim runtime: only the env server deps are installed
+# (openenv-core, fastapi, uvicorn, pydantic, gradio). The training stack
+# (torch / unsloth / trl) is NOT installed here - that lives in the
+# Colab notebook. This keeps the deployed image small.
 
-# ── Stage 1: Builder ──────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
-
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        git \
-        curl \
-        build-essential && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install uv (fast Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    mv /root/.local/bin/uv /usr/local/bin/uv && \
-    mv /root/.local/bin/uvx /usr/local/bin/uvx
-
-# Copy project files
-COPY . /app/env
-
-WORKDIR /app/env
-
-# Install dependencies into a venv using pyproject.toml
-# Use uv.lock if it exists for reproducible builds; otherwise resolve fresh.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
-        uv sync --frozen --no-editable; \
-    else \
-        uv sync --no-editable; \
-    fi
-
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install curl for healthcheck
+# curl is needed for the HEALTHCHECK. build-essential is needed by
+# pydantic-core's optional Rust shims on slim Python images.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl build-essential && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy the virtual environment from builder
-COPY --from=builder /app/env/.venv /app/.venv
+# Install runtime deps first (better Docker layer caching).
+COPY server/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy the environment source code
-COPY --from=builder /app/env /app/env
+# Copy project source into the image.
+COPY . /app/env
+WORKDIR /app/env
 
-# Activate the venv
-ENV PATH="/app/.venv/bin:$PATH"
-
-# Set PYTHONPATH so all relative imports work correctly
-# (Do NOT append to $PYTHONPATH — it is undefined in a fresh image)
-ENV PYTHONPATH="/app/env"
-
-# Must match app_port in README.md front matter (8000).
-# HF Spaces proxies external traffic to this port.
+# Make `import server.app`, `import models`, etc. resolve to /app/env.
+ENV PYTHONPATH=/app/env
 ENV PORT=8000
 
-# Health check — /health is registered by openenv's create_app
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# /health is auto-registered by openenv's create_app().
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 EXPOSE 8000
 
-# Launch the FastAPI server
-CMD ["sh", "-c", "cd /app/env && uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# uvicorn imports server.app:app from /app/env (PYTHONPATH).
+CMD ["sh", "-c", "uvicorn server.app:app --host 0.0.0.0 --port ${PORT:-8000}"]

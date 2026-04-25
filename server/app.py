@@ -1,32 +1,8 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
 FastAPI application for the Incident Commander Environment.
 
-This module creates an HTTP server that exposes the IncidentCommanderEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
-
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
-    - GET /web: Minimal Gradio interface for reset/step testing
-
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
-
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
+Exposes the IncidentCommanderEnvironment over HTTP and WebSocket endpoints
+compatible with EnvClient. Mounts a Gradio /web UI when gradio is installed.
 """
 
 import json
@@ -35,12 +11,12 @@ try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
     raise ImportError(
-        "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
+        "openenv-core is required. Install via `pip install openenv-core[core]`."
     ) from e
 
-# Resilient imports — work whether `server.app` is run as a module
-# from the repo root, as a top-level script, or as part of the installed
-# `incident_commander` package.
+# Resilient imports - work whether server.app is run as a module from the
+# repo root, as a top-level script, or as part of the installed
+# incident_commander package.
 try:
     from server.incident_commander_environment import IncidentCommanderEnvironment
     from models import IncidentCommanderAction, IncidentCommanderObservation
@@ -53,8 +29,7 @@ except (ImportError, ModuleNotFoundError):
             IncidentCommanderEnvironment,
         )
         from incident_commander.models import (
-            IncidentCommanderAction,
-            IncidentCommanderObservation,
+            IncidentCommanderAction, IncidentCommanderObservation,
         )
 
 try:
@@ -63,18 +38,18 @@ except Exception:  # pragma: no cover
     gr = None
 
 
-# Create the app with web interface and README integration
+# Create the OpenEnv FastAPI app with HTTP + WS endpoints + /docs + /health.
 app = create_app(
     IncidentCommanderEnvironment,
     IncidentCommanderAction,
     IncidentCommanderObservation,
     env_name="incident_commander",
-    max_concurrent_envs=16,  # Up to 16 parallel GRPO rollout workers
+    max_concurrent_envs=16,
 )
 
 
 def _build_gradio_demo():
-    """Create a lightweight Gradio app for manual reset/step testing."""
+    """Lightweight Gradio UI for manual reset/step testing."""
     env = IncidentCommanderEnvironment()
 
     def _to_json(value):
@@ -86,17 +61,11 @@ def _build_gradio_demo():
             payload = value
         return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
 
-    def do_reset(difficulty: int):
+    def do_reset(difficulty):
         obs = env.reset(difficulty=difficulty)
         return _to_json(obs)
 
-    def do_step(
-        action_type: str,
-        target_service: str,
-        hypothesis: str,
-        justification: str,
-        time_range_minutes: int,
-    ):
+    def do_step(action_type, target_service, hypothesis, justification, time_range_minutes):
         action = IncidentCommanderAction(
             action_type=action_type,
             target_service=target_service.strip() or "payment-service",
@@ -108,21 +77,14 @@ def _build_gradio_demo():
         return _to_json(obs)
 
     action_choices = [
-        "read_logs",
-        "read_metrics",
-        "read_deployment_history",
-        "read_dependency_graph",
+        "read_logs", "read_metrics",
+        "read_deployment_history", "read_dependency_graph",
         "identify_cause",
-        "restart_pod",
-        "rollback",
-        "scale_up",
-        "hotfix",
-        "escalate",
-        "monitor_recovery",
-        "resolve",
+        "restart_pod", "rollback", "scale_up", "hotfix",
+        "escalate", "monitor_recovery", "resolve",
     ]
 
-    with gr.Blocks(title="Incident Commander Step/Reset") as demo:
+    with gr.Blocks(title="Incident Commander tester") as demo:
         gr.Markdown(
             "## Incident Commander tester\n"
             "Use **Reset** to start a new incident and **Step** to execute actions."
@@ -150,48 +112,31 @@ def _build_gradio_demo():
         reset_btn.click(do_reset, inputs=[difficulty], outputs=[output])
         step_btn.click(
             do_step,
-            inputs=[
-                action_type,
-                target_service,
-                hypothesis,
-                justification,
-                time_range_minutes,
-            ],
+            inputs=[action_type, target_service, hypothesis,
+                    justification, time_range_minutes],
             outputs=[output],
         )
     return demo
 
 
 if gr is not None:
-    app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/web")
+    try:
+        app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/web")
+    except Exception as e:  # pragma: no cover
+        # Gradio mounting is best-effort; the API endpoints still work.
+        print(f"[warn] could not mount Gradio /web demo: {e}")
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
-    """
-    Entry point for direct execution via uv run or python -m.
-
-    This function enables running the server without Docker:
-        uv run --project . server
-        uv run --project . server --port 8001
-        python -m incident_commander.server.app
-
-    Args:
-        host: Host address to bind to (default: "0.0.0.0")
-        port: Port number to listen on (default: 8000)
-
-    For production deployments, consider using uvicorn directly with
-    multiple workers:
-        uvicorn incident_commander.server.app:app --workers 4
-    """
+def main(host="0.0.0.0", port=8000):
+    """CLI entrypoint registered as `server` in pyproject.toml."""
     import uvicorn
-
     uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
+    parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
-    main(port=args.port)
+    main(host=args.host, port=args.port)
