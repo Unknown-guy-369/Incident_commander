@@ -36,8 +36,8 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import IncidentCommanderAction, IncidentCommanderObservation
-    from .incident_commander_environment import IncidentCommanderEnvironment
+    from models import IncidentCommanderAction, IncidentCommanderObservation
+    from incident_commander_environment import IncidentCommanderEnvironment
 except ModuleNotFoundError:
     from models import IncidentCommanderAction, IncidentCommanderObservation
     from server.incident_commander_environment import IncidentCommanderEnvironment
