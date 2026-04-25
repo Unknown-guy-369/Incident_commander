@@ -16,7 +16,7 @@ Endpoints:
     - GET /state: Get current environment state
     - GET /schema: Get action/observation schemas
     - WS /ws: WebSocket endpoint for persistent sessions
-    - GET /gradio: Minimal Gradio interface for reset/step testing
+    - GET /web: Minimal Gradio interface for reset/step testing
 
 Usage:
     # Development (with auto-reload):
@@ -151,7 +151,7 @@ def _build_gradio_demo():
 
 
 if gr is not None:
-    app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/gradio")
+    app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/web")
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
