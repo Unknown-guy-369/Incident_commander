@@ -70,15 +70,10 @@ def _on_step(step_idx: int, completion: str, obs: dict) -> None:
 
 
 def run_episode(model, tokenizer, *, difficulty: int = 1, max_steps: int = 25,
-                env_url: str = "", verbose: bool = True) -> dict:
-    if env_url:
-        env_ctx = SyncEnvClient(env_url)
-        if verbose:
-            print(f"Using remote env: {env_url}")
-    else:
-        env_ctx = _make_local_env(difficulty)
-        if verbose:
-            print("Using local in-process env.")
+                env_url: str = DEFAULT_REMOTE_URL, verbose: bool = True) -> dict:
+    env_ctx = SyncEnvClient(env_url)
+    if verbose:
+        print(f"Using remote env: {env_url}")
 
     generate_fn = make_generate_fn(model, tokenizer)
 
@@ -124,8 +119,8 @@ def main():
     parser.add_argument(
         "--env-url",
         type=str,
-        default=os.environ.get("INCIDENT_COMMANDER_ENV_URL", DEFAULT_REMOTE_URL),
-        help="Remote OpenEnv base URL. Empty string => use local env.",
+        default=DEFAULT_REMOTE_URL,
+        help="Remote OpenEnv base URL (default: the team's HF Space).",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-step output")
     args = parser.parse_args()
@@ -153,7 +148,7 @@ def main():
             model, tokenizer,
             difficulty=args.difficulty,
             max_steps=args.max_steps,
-            env_url=(args.env_url or "").strip(),
+            env_url=args.env_url,
             verbose=not args.quiet,
         )
         rewards.append(summary["reward"])
