@@ -260,8 +260,8 @@ training_args = GRPOConfig(
     save_steps=10,
     save_total_limit=5,
     beta=0.04,
-    fp16=not torch.cuda.is_bf16_supported(),
-    bf16=torch.cuda.is_bf16_supported(),
+    fp16=True,
+    bf16=False,
     report_to="none",
 )
 trainer = GRPOTrainer(
