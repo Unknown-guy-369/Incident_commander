@@ -1,12 +1,12 @@
 """
-AI Incident Commander — OpenRouter Inference Script
+AI Incident Commander — Local Model Inference Script
 
-Runs an episode using an LLM from OpenRouter (OpenAI-compatible API).
-Works with any model supported by OpenRouter: Claude, Gemini, Llama, etc.
+Runs an episode using a local LLM from Hugging Face via transformers or llama-cpp.
+Supports both regular transformer models and GGUF quantized models.
 
 Usage:
-    python inference_openrouter.py --model anthropic/claude-3.5-sonnet --difficulty 1
-    python inference_openrouter.py --model openai/gpt-4o --difficulty 2
+    python inference_openrouter.py --model unsloth/Qwen3.6-27B-GGUF --difficulty 1
+    python inference_openrouter.py --model meta-llama/Llama-2-7b-hf --device cuda --difficulty 2
 """
 
 import os
@@ -14,12 +14,7 @@ import re
 import argparse
 from dataclasses import dataclass
 from typing import Optional
-
-# OpenAI SDK (works with OpenRouter since it's OpenAI-compatible)
-try:
-    from openai import OpenAI
-except ImportError:
-    raise ImportError("openai package required: pip install openai")
+from huggingface_hub import InferenceClient
 
 from server.incident_commander_environment import IncidentCommanderEnvironment
 from models import IncidentCommanderAction
@@ -29,9 +24,8 @@ from models import IncidentCommanderAction
 # Config
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
-DEFAULT_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-DEFAULT_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
+DEFAULT_MODEL = os.environ.get("LOCAL_MODEL", "google/gemma-4-31B-it:novita")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
 SYSTEM_PROMPT = """You are an elite AI Incident Commander specialising in SRE.
 
@@ -116,54 +110,57 @@ class LLMResponse:
     usage: Optional[dict] = None
 
 
-class OpenRouterLLM:
-    """Lightweight OpenRouter client."""
+class LocalModelLLM:
+    """HuggingFace InferenceClient wrapper for Incident Commander."""
 
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
-        base_url: str = DEFAULT_BASE_URL,
-        api_key: str = DEFAULT_API_KEY,
+        api_key: str = HF_TOKEN,
         temperature: float = 0.3,
         max_tokens: int = 512,
     ):
         if not api_key:
             raise ValueError(
-                "OpenRouter API key required. Set OPENROUTER_API_KEY env var "
-                "or pass --api-key"
+                "HF_TOKEN required. Set HF_TOKEN env var or pass --api-key. "
+                "Get your token at https://huggingface.co/settings/tokens"
             )
-
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
-        self.model = model
+        
+        self.model_name = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        
+        print(f"Using model: {model}")
+        self.client = InferenceClient(api_key=api_key)
 
     def generate(self, prompt: str, system: str = SYSTEM_PROMPT) -> LLMResponse:
+        """Generate using HuggingFace Inference API."""
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ]
+        
         response = self.client.chat.completions.create(
-            model=self.model,
+            model=self.model_name,
             messages=messages,
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
-        choice = response.choices[0]
-        content = choice.message.content or ""
-
+        
+        content = response.choices[0].message.content
+        
         # Extract reasoning from <thought> tags if present
         thought_match = re.search(r"<thought>(.*?)</thought>", content, re.DOTALL)
         reasoning = thought_match.group(1).strip() if thought_match else None
-
+        
         return LLMResponse(
             content=content,
             reasoning=reasoning,
-            model=response.model,
+            model=self.model_name,
             usage={
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                "total_tokens": getattr(response.usage, "total_tokens", 0),
             },
         )
 
@@ -206,12 +203,12 @@ def format_observation(obs) -> str:
 
 
 def run_episode(
-    llm: OpenRouterLLM,
+    llm: LocalModelLLM,
     difficulty: int = 1,
     max_steps: int = 50,
     verbose: bool = True,
 ) -> dict:
-    """Run a single episode with an OpenRouter LLM."""
+    """Run a single episode with a local LLM."""
     env = IncidentCommanderEnvironment(difficulty=difficulty)
     obs = env.reset()
 
@@ -317,7 +314,7 @@ def run_episode(
 
 
 def run_multi_episode(
-    llm: OpenRouterLLM,
+    llm: LocalModelLLM,
     num_episodes: int = 5,
     difficulty: int = 1,
     max_steps: int = 50,
@@ -354,24 +351,18 @@ def run_multi_episode(
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenRouter inference for Incident Commander")
+    parser = argparse.ArgumentParser(description="HuggingFace Inference API for Incident Commander")
     parser.add_argument(
         "--model",
         type=str,
         default=DEFAULT_MODEL,
-        help=f"OpenRouter model name (default: {DEFAULT_MODEL})",
-    )
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        default=DEFAULT_BASE_URL,
-        help=f"OpenRouter base URL (default: {DEFAULT_BASE_URL})",
+        help=f"Model name from HuggingFace (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--api-key",
         type=str,
-        default=DEFAULT_API_KEY,
-        help="OpenRouter API key (or set OPENROUTER_API_KEY env var)",
+        default=HF_TOKEN,
+        help="HuggingFace API key (or set HF_TOKEN env var)",
     )
     parser.add_argument(
         "--difficulty",
@@ -399,20 +390,18 @@ def main():
     )
     args = parser.parse_args()
 
-    # Resolve API key
-    api_key = args.api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    # Validate API key
+    api_key = args.api_key or os.environ.get("HF_TOKEN", "")
     if not api_key:
         parser.error(
-            "OpenRouter API key required. Pass --api-key or set OPENROUTER_API_KEY env var.\n"
-            "Get your key at https://openrouter.ai/keys"
+            "HF_TOKEN required. Pass --api-key or set HF_TOKEN env var.\n"
+            "Get your token at https://huggingface.co/settings/tokens"
         )
 
     print(f"Using model: {args.model}")
-    print(f"Base URL:    {args.base_url}")
 
-    llm = OpenRouterLLM(
+    llm = LocalModelLLM(
         model=args.model,
-        base_url=args.base_url,
         api_key=api_key,
     )
 
