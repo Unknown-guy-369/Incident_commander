@@ -69,7 +69,10 @@ def _simulate_fix_outcome(action_type, true_root_cause, locked_hypothesis):
 class IncidentCommanderEnvironment(Environment):
     """AI Incident Commander - Theme 3.1 RL environment."""
 
-    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    # Set to False so OpenEnv keeps a single shared env instance.
+    # If True, OpenEnv may route each HTTP call to a fresh env from a pool,
+    # which loses _read_logs_set / _ctx state between /reset and /step calls.
+    SUPPORTS_CONCURRENT_SESSIONS: bool = False
 
     def __init__(self, difficulty: int = 1):
         super().__init__()

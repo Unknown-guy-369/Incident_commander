@@ -44,7 +44,9 @@ app = create_app(
     IncidentCommanderAction,
     IncidentCommanderObservation,
     env_name="incident_commander",
-    max_concurrent_envs=16,
+    # Single shared env instance — required because the env stores
+    # episode state on `self`. Pooling would split state across requests.
+    max_concurrent_envs=1,
 )
 
 
