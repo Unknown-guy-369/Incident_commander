@@ -70,10 +70,24 @@ def _on_step(step_idx: int, completion: str, obs: dict) -> None:
 
 
 def run_episode(model, tokenizer, *, difficulty: int = 1, max_steps: int = 25,
-                env_url: str = DEFAULT_REMOTE_URL, verbose: bool = True) -> dict:
-    env_ctx = SyncEnvClient(env_url)
-    if verbose:
-        print(f"Using remote env: {env_url}")
+                env_url: str = "", verbose: bool = True) -> dict:
+    """Run one episode against either a remote OpenEnv server or the local
+    in-process env.
+
+    env_url:
+        Empty string  -> use local in-process env (recommended; matches
+                         the demo's setup, no HTTP session bugs).
+        Any URL       -> SyncEnvClient against that URL (e.g. the live HF Space).
+    """
+    use_local = not (env_url and env_url.strip())
+    if use_local:
+        env_ctx = _make_local_env(difficulty)
+        if verbose:
+            print("Using local in-process env (no HTTP)")
+    else:
+        env_ctx = SyncEnvClient(env_url)
+        if verbose:
+            print(f"Using remote env: {env_url}")
 
     generate_fn = make_generate_fn(model, tokenizer)
 
@@ -114,13 +128,14 @@ def main():
     parser.add_argument("--difficulty", type=int, default=1, choices=[1, 2, 3, 4])
     parser.add_argument("--max-steps", type=int, default=25,
                         help="Max env steps per episode")
-    parser.add_argument("--episodes", type=int, default=1,
-                        help="How many episodes to evaluate")
+    parser.add_argument("--episodes", type=int, default=10,
+                        help="How many episodes to evaluate (default 10)")
     parser.add_argument(
         "--env-url",
         type=str,
-        default=DEFAULT_REMOTE_URL,
-        help="Remote OpenEnv base URL (default: the team's HF Space).",
+        default="",
+        help="Remote OpenEnv base URL. Empty string = use local in-process env "
+             "(recommended). Set to e.g. https://...hf.space to use a deployed Space.",
     )
     parser.add_argument("--quiet", action="store_true", help="Suppress per-step output")
     args = parser.parse_args()
@@ -136,7 +151,7 @@ def main():
         FastLanguageModel.for_inference(model)
     except Exception as e:  # noqa: BLE001
         print(f"Error loading model: {e}")
-        print("If the model isn't trained yet, run: python training.py --run")
+        print("If the model isn't trained yet, train it first or pull from HF Hub.")
         return
 
     rewards: list = []
