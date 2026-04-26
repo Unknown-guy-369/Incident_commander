@@ -2,7 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "unsloth",
-#     "trl>=0.12.0,<0.14.0",
+#     "trl>=0.13.0",
 #     "datasets>=2.20.0",
 #     "peft>=0.11.0",
 #     "accelerate>=0.33.0",
