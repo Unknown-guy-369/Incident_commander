@@ -123,7 +123,7 @@ def _build_gradio_demo():
 
 if gr is not None:
     try:
-        app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/web")
+        app = gr.mount_gradio_app(app, _build_gradio_demo(), path="/")
     except Exception as e:  # pragma: no cover
         # Gradio mounting is best-effort; the API endpoints still work.
         print(f"[warn] could not mount Gradio /web demo: {e}")
